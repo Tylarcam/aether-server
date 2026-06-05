@@ -1,0 +1,364 @@
+╔═══════════════════════════════════════════════════════════════════════════════════╗
+║                     AUDIO TRANSCRIBER MVP - ARCHITECTURE                          ║
+╚═══════════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           CHROME EXTENSION LAYER                                │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                        POPUP UI (popup.html)                    │
+    │  ┌──────────┬──────────┬──────────┬──────────┬──────────┐      │
+    │  │Downloads │Transcribe│  Record  │ History  │ Settings │      │
+    │  └────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┘      │
+    └───────┼──────────┼──────────┼──────────┼──────────┼────────────┘
+            │          │          │          │          │
+            ▼          ▼          ▼          ▼          ▼
+    ┌────────────────────────────────────────────────────────────────┐
+    │                    POPUP LOGIC (popup.js)                      │
+    │                                                                 │
+    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐ │
+    │  │  YouTube    │  │   Tab Audio  │  │  History & Settings  │ │
+    │  │ Transcriber │  │   Recorder   │  │     Management       │ │
+    │  └──────┬──────┘  └──────┬───────┘  └──────┬───────────────┘ │
+    │         │                │                  │                  │
+    └─────────┼────────────────┼──────────────────┼──────────────────┘
+              │                │                  │
+              │                │                  │
+    ┌─────────▼────────────────▼──────────────────▼─────────────────┐
+    │              CHROME EXTENSION APIs & STORAGE                   │
+    │                                                                 │
+    │  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐  │
+    │  │ tabCapture  │  │  downloads  │  │   storage.sync       │  │
+    │  │   (audio)   │  │    (save)   │  │  (API key config)    │  │
+    │  └─────────────┘  └─────────────┘  └──────────────────────┘  │
+    │                                                                 │
+    │  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐  │
+    │  │  scripting  │  │  activeTab  │  │  storage.local       │  │
+    │  │             │  │             │  │  (transcript history)│  │
+    │  └─────────────┘  └─────────────┘  └──────────────────────┘  │
+    └─────────────────────────────────────────────────────────────────┘
+              │                                    │
+              │                                    │
+    ┌─────────▼─────────────┐          ┌──────────▼──────────────┐
+    │  background.js        │          │   content.js            │
+    │  (Service Worker)     │          │   (Content Script)      │
+    │                       │          │                         │
+    │  • Extension setup    │          │  • Page interaction     │
+    └───────────────────────┘          └─────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         BACKEND SERVER LAYER                                    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────┐
+    │              EXPRESS.JS SERVER (server.js)                  │
+    │                   localhost:3000                            │
+    │                                                             │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │         POST /api/extract-audio                      │  │
+    │  │  • Validates YouTube URL                             │  │
+    │  │  • Executes yt-dlp command                           │  │
+    │  │  • Returns public audio URL                          │  │
+    │  └────────────────┬─────────────────────────────────────┘  │
+    │                   │                                         │
+    │                   ▼                                         │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │              yt-dlp (System Binary)                  │  │
+    │  │  • Downloads YouTube audio                           │  │
+    │  │  • Converts to MP3/WAV/M4A                           │  │
+    │  │  • Saves to ./audio/ directory                       │  │
+    │  └────────────────┬─────────────────────────────────────┘  │
+    │                   │                                         │
+    │                   ▼                                         │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │        GET /audio/:filename (Static Files)           │  │
+    │  │  • Serves extracted audio files                      │  │
+    │  │  • Auto-cleanup after 1 hour                         │  │
+    │  └──────────────────────────────────────────────────────┘  │
+    │                                                             │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │              GET /health                             │  │
+    │  │  • Health check endpoint                             │  │
+    │  └──────────────────────────────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                       EXTERNAL SERVICES LAYER                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────┐
+    │              ASSEMBLYAI API (api.assemblyai.com)            │
+    │                                                             │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │   POST /v2/transcript                                │  │
+    │  │   • Submit audio URL for transcription               │  │
+    │  │   • Returns transcript ID                            │  │
+    │  └────────────────┬─────────────────────────────────────┘  │
+    │                   │                                         │
+    │                   ▼                                         │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │   GET /v2/transcript/:id                             │  │
+    │  │   • Poll for transcription status                    │  │
+    │  │   • Returns completed transcript text                │  │
+    │  └──────────────────────────────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             DATA FLOWS                                          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ FLOW 1: YOUTUBE TRANSCRIPTION                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  User Input (YouTube URL)
+         │
+         ▼
+  ┌──────────────┐       POST       ┌─────────────────┐
+  │  popup.js    │──────────────────>│  server.js      │
+  │              │  /api/extract     │  localhost:3000 │
+  └──────────────┘                   └────────┬────────┘
+         ▲                                    │
+         │                                    ▼
+         │                           ┌─────────────────┐
+         │                           │    yt-dlp       │
+         │                           │  (downloads &   │
+         │                           │   converts)     │
+         │                           └────────┬────────┘
+         │                                    │
+         │                                    ▼
+         │                           ┌─────────────────┐
+         │    Audio URL              │  ./audio/       │
+         │<──────────────────────────│  audio_ID.mp3   │
+         │                           └─────────────────┘
+         │
+         │ POST /v2/transcript
+         ├──────────────────────────>┌─────────────────┐
+         │                           │  AssemblyAI API │
+         │                           └────────┬────────┘
+         │                                    │
+         │                                    ▼
+         │                           (Processing audio...)
+         │                                    │
+         │ GET /v2/transcript/:id            │
+         │<───────────────────────────────────┘
+         │   (Polling every 5s)
+         │
+         ▼
+  ┌──────────────┐
+  │ Display text │
+  │ Save history │
+  │ Download     │
+  │ (TXT/MD/PDF) │
+  └──────────────┘
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ FLOW 2: TAB AUDIO RECORDING                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  User clicks "Start Recording"
+         │
+         ▼
+  ┌──────────────────┐
+  │  popup.js        │
+  │  chrome.tabCapture.capture()
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────┐
+  │  MediaRecorder   │
+  │  (records audio  │
+  │   chunks)        │
+  └────────┬─────────┘
+           │
+           │ User clicks "Stop"
+           │
+           ▼
+  ┌──────────────────┐
+  │  Convert to WAV  │
+  │  (Web Audio API) │
+  │  • Decode WebM   │
+  │  • Encode PCM    │
+  │  • Create blob   │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────┐
+  │ chrome.downloads │
+  │   .download()    │
+  │                  │
+  │ • Data URL       │
+  │ • Timestamped    │
+  │ • saveAs: false  │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────┐
+  │  Downloads Folder│
+  │  recording-      │
+  │  2026-01-10-     │
+  │  14-30-25.wav    │
+  └──────────────────┘
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ FLOW 3: HISTORY & SETTINGS                                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  Settings:
+  ┌──────────────────┐
+  │ API Key Input    │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────────┐
+  │ chrome.storage.sync  │
+  │ { assemblyai_key }   │
+  └──────────────────────┘
+
+  History:
+  ┌──────────────────┐
+  │ Transcript Data  │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────────┐
+  │ chrome.storage.local │
+  │ { history: [...] }   │
+  │ • text               │
+  │ • timestamp          │
+  └──────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          TECHNOLOGY STACK                                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  FRONTEND (Chrome Extension)
+  ├── HTML5 + CSS3
+  ├── Vanilla JavaScript (ES6+)
+  ├── Chrome Extension Manifest V3
+  ├── Web Audio API (WAV encoding)
+  ├── MediaRecorder API
+  └── FontAwesome Icons
+
+  BACKEND (Node.js Server)
+  ├── Express.js
+  ├── CORS middleware
+  ├── yt-dlp (external binary)
+  └── File system (temporary storage)
+
+  EXTERNAL SERVICES
+  └── AssemblyAI Speech-to-Text API
+
+  STORAGE
+  ├── chrome.storage.sync (API keys, settings)
+  ├── chrome.storage.local (transcript history)
+  └── Local downloads folder (recordings)
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        FILE STRUCTURE                                           │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  audio_transcriber_mvp/
+  ├── manifest.json              # Extension configuration (Manifest V3)
+  ├── server.js                  # Express backend server
+  │
+  ├── popup/
+  │   ├── popup.html             # Main UI
+  │   ├── popup.js               # UI logic & API calls
+  │   └── popup.css              # Styling
+  │
+  ├── background/
+  │   └── background.js          # Service worker
+  │
+  ├── content/
+  │   └── content.js             # Content script
+  │
+  ├── icons/
+  │   ├── icon16.png
+  │   ├── icon48.png
+  │   └── icon128.png
+  │
+  ├── audio/                     # Temporary audio storage (server)
+  │   └── audio_*.mp3/wav/m4a    # Auto-deleted after 1 hour
+  │
+  └── node_modules/              # Dependencies
+      ├── express
+      ├── cors
+      └── @fortawesome/fontawesome-free
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        KEY FEATURES                                             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  1. YOUTUBE TRANSCRIPTION
+     • Paste URL → Extract audio → Transcribe → Download (TXT/MD/PDF)
+     • Supports MP3/WAV/M4A formats
+     • Polling mechanism for async transcription
+
+  2. TAB AUDIO RECORDING
+     • Capture active tab audio
+     • Convert WebM → WAV (PCM encoding)
+     • Auto-save to downloads folder with timestamp
+     • No user prompt (saveAs: false)
+
+  3. TRANSCRIPT HISTORY
+     • Local storage of past transcriptions
+     • Timestamp tracking
+     • Quick download from history
+
+  4. DOWNLOADS MANAGEMENT
+     • Track downloaded transcripts
+     • View recent downloads
+
+  5. SETTINGS
+     • AssemblyAI API key configuration
+     • Secure storage via chrome.storage.sync
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        SECURITY CONSIDERATIONS                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  ✓ Manifest V3 (latest security standard)
+  ✓ CORS enabled on backend
+  ✓ URL validation for YouTube links
+  ✓ Input sanitization (format whitelist)
+  ✓ Secure API key storage (chrome.storage.sync)
+  ✓ Auto-cleanup of temporary files
+  ✓ Host permissions declared in manifest
+  ✓ Bearer token authentication for AssemblyAI
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        DEPLOYMENT REQUIREMENTS                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  PREREQUISITES:
+  • Node.js (v14+)
+  • npm
+  • yt-dlp installed and in PATH
+  • Chrome/Edge browser
+  • AssemblyAI API key
+
+  SETUP:
+  1. npm install
+  2. node server.js (start backend)
+  3. Load extension in Chrome (chrome://extensions)
+  4. Configure API key in Settings tab
+
+  ENVIRONMENT:
+  • SERVER_URL: Public server URL (default: http://localhost:3000)
+  • PORT: Server port (default: 3000)
+
+═══════════════════════════════════════════════════════════════════════════════════
+                              END OF ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════════════

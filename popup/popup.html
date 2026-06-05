@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="popup.css" />
+  <link rel="stylesheet" href="../node_modules/@fortawesome/fontawesome-free/css/all.min.css" />
+</head>
+<body>
+  <button id="closeWindowBtn" class="btn" style="position:absolute;top:16px;right:16px;">X</button>
+  <div class="tabs" role="tablist">
+    <button class="tablink" data-tab="downloads" title="Downloads" role="tab" aria-selected="false" tabindex="0"><i class="fa-solid fa-download"></i></button>
+    <button class="tablink" data-tab="transcribe" title="Transcribe" role="tab" aria-selected="false" tabindex="0"><i class="fa-solid fa-microphone-lines"></i></button>
+    <button class="tablink" data-tab="record" title="Record" role="tab" aria-selected="false" tabindex="0"><i class="fa-solid fa-circle-dot"></i></button>
+    <button class="tablink" data-tab="history" title="History" role="tab" aria-selected="false" tabindex="0"><i class="fa-solid fa-clock-rotate-left"></i></button>
+    <button class="tablink" data-tab="settings" title="Settings" role="tab" aria-selected="false" tabindex="0"><i class="fa-solid fa-gear"></i></button>
+  </div>
+  <div id="downloads" class="tabcontent" role="tabpanel" aria-labelledby="downloads-tab">
+    <h2>Downloads</h2>
+    <div id="downloadsList" class="result"></div>
+  </div>
+
+  <div id="transcribe" class="tabcontent">
+    <h2>YouTube Transcription</h2>
+    <input id="youtubeUrl" class="input" placeholder="Paste YouTube URL" />
+    <button id="transcribeBtn" class="btn">Transcribe</button>
+    <div id="transcribeStatus" class="status"></div>
+    <div id="transcribeResult" class="result"></div>
+  </div>
+
+  <div id="record" class="tabcontent">
+    <h2>Record Tab Audio</h2>
+    <button id="recordBtn" class="btn">Start Recording</button>
+    <button id="stopBtn" class="btn">Stop</button>
+    <div id="recordStatus" class="status"></div>
+    <button id="transcribeRecordingBtn" class="btn" style="display:none;">Transcribe Recording</button>
+    <div id="recordTranscriptResult" class="result"></div>
+  </div>
+
+  <div id="history" class="tabcontent">
+    <h2>Transcript History</h2>
+    <ul id="historyList" class="history-list"></ul>
+  </div>
+
+  <div id="settings" class="tabcontent">
+    <h2>About Aether</h2>
+    <p class="status">Aether is free — no API key required.</p>
+    <p class="status">Transcription is powered by Groq Whisper via a private cloud backend.</p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

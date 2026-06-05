@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dark theme (default) */
+[data-theme="dark"],
+:root {
+  --bg-base: #0F0F14;
+  --bg-elevated: #1A1A24;
+  --bg-card: rgba(30, 30, 42, 0.6);
+  --text-primary: #FFFFFF;
+  --text-secondary: #E8E8F0;
+  --text-muted: #8E8EA0;
+  --accent-primary: #E0E0FF;
+  --accent-secondary: #F0F0FF;
+  --accent-glow: #C0C0FF;
+  --border-color: rgba(255, 255, 255, 0.1);
+  --scrollbar-thumb: #E0E0FF;
+  --scrollbar-thumb-hover: #C0C0FF;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-base: #F8F8FA;
+  --bg-elevated: #FFFFFF;
+  --bg-card: rgba(255, 255, 255, 0.8);
+  --text-primary: #0F0F14;
+  --text-secondary: #1A1A24;
+  --text-muted: #6B6B7A;
+  --accent-primary: #6366F1;
+  --accent-secondary: #818CF8;
+  --accent-glow: #4F46E5;
+  --border-color: rgba(0, 0, 0, 0.1);
+  --scrollbar-thumb: #6366F1;
+  --scrollbar-thumb-hover: #4F46E5;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-width: 400px;
+  min-height: 500px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Glass effect utility class */
+.glass-effect {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--border-color);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  transition: background-color 0.3s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}

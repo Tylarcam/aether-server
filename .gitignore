@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Build output (rebuild with `npm run build`; may embed VITE_* keys if .env present)
+dist/
+
+# Local server audio cache
+audio/
+*.mp3
+*.m4a
+*.wav
+*.webm
+*.opus
+*.flac
+
+# Large local media
+*.mp4
+*.MP4
+*.avi
+*.mov
+*.mkv
+
+# OS & editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local temp / Windows artifacts
+tmpclaude-*
+nul
+session_id.md
+
+# Large binary/archive files
+*.7z
+
+# Internal tooling (not part of the extension or server)
+.agent-os/
+.claude/
+.codex/
+backup_vanilla/
+
+# Optional local tooling (not needed for extension runtime)
+.claude/settings.local.json
+.cursor/

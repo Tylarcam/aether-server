@@ -1,0 +1,21 @@
+# Requirements for video transcription using Whisper
+# Install with: pip install -r requirements_transcribe.txt
+
+# Core Whisper package (for transcribe_video_simple.py)
+openai-whisper>=20231117
+
+# Core Whisper dependencies (for transcribe_video_whisper.py)
+transformers>=4.36.0
+torch>=2.1.0
+numpy>=1.24.0
+
+# Audio processing (for extracting audio from video without ffmpeg)
+librosa>=0.10.0
+soundfile>=0.12.0
+pydub>=0.25.1  # Alternative audio extraction library
+
+# Video processing (optional, requires ffmpeg)
+moviepy>=1.0.3  # Recommended for video files (also needs ffmpeg)
+# OR install ffmpeg separately: https://ffmpeg.org/download.html
+
+

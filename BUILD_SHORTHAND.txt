@@ -1,0 +1,7 @@
+## LLM Shorthand (300 chars max)
+
+React18+Vite+TW ChromeExt[manifest.v3]:
+5Tabs[DL,TR,REC,HIST,SET]→Hooks[useTabCapture,useTranscription,useStorage,useAudioViz]
+→API[Chrome{tabCapture,storage,downloads},AssemblyAI,LocalSrv:3000]
+Features: YT→audio[mp3/wav/m4a/opus/flac], TabAudio→WAV, STT[AssemblyAI], History, Settings
+UI: GlassMorph+FramerMotion+Lucide, Build: 306KB→96KBgz
