@@ -3,7 +3,7 @@ import { Check, Download, Sparkles, Upload } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranscription } from '@/hooks/useTranscription';
 import { useUIReaction } from '@/hooks/useUIReaction';
-import { extractYouTubeUrl, isValidYouTubeUrl, generateTimestamp } from '@/utils/validators';
+import { extractUrl, isValidYouTubeUrl, generateTimestamp } from '@/utils/validators';
 import { isValidWhisperFile, isValidFileSize } from '@utils/fileValidators';
 import GlassCard from '@/components/layout/GlassCard';
 import Button from '@/components/shared/Button';
@@ -13,7 +13,7 @@ import Select from '@/components/shared/Select';
 import StatusMessage from '@/components/shared/StatusMessage';
 
 export default function TranscribeTab() {
-  const [mode, setMode] = useState('youtube');
+  const [mode, setMode] = useState('url');
   const [url, setUrl] = useState('');
   const [format, setFormat] = useState('mp3');
   const [selectedFile, setSelectedFile] = useState(null);
@@ -47,7 +47,8 @@ export default function TranscribeTab() {
     setIsDownloading(true);
     setDownloadStatus('📥 Extracting audio...');
     try {
-      const response = await fetch('http://localhost:3000/api/extract-audio', {
+      const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
+      const response = await fetch(`${serverUrl}/api/extract-audio`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, format: downloadFormat })
@@ -149,23 +150,22 @@ export default function TranscribeTab() {
       const item = items[0];
       if (item.kind === 'string' && item.type === 'text/plain') {
         item.getAsString((text) => {
-          const youtubeUrl = extractYouTubeUrl(text);
-          if (youtubeUrl) {
-            setUrl(youtubeUrl);
-            setMode('youtube');
-            // Auto-trigger transcription after a short delay
+          const extractedUrl = extractUrl(text);
+          if (extractedUrl) {
+            setUrl(extractedUrl);
+            setMode('url');
             setTimeout(() => {
-              transcribe(youtubeUrl, format);
+              transcribe(extractedUrl, format);
             }, 100);
           } else {
-            setDragError('No valid YouTube URL found in dropped text.');
+            setDragError('No valid URL found in dropped text.');
           }
         });
         return;
       }
     }
 
-    setDragError('Please drop a file or YouTube URL.');
+    setDragError('Please drop a file or URL.');
   };
 
   return (
@@ -192,7 +192,7 @@ export default function TranscribeTab() {
             >
               <Upload className="w-16 h-16 text-luna-accent-primary mx-auto mb-4" />
               <p className="text-xl font-semibold text-luna-white mb-2">Drop to transcribe</p>
-              <p className="text-sm text-luna-silver">Drop a file or YouTube URL here</p>
+              <p className="text-sm text-luna-silver">Drop a file or video URL here</p>
             </motion.div>
           </motion.div>
         )}
@@ -201,7 +201,7 @@ export default function TranscribeTab() {
         <div className="text-center space-y-4">
           <h2 className="text-2xl font-bold text-luna-white">Transcribe Audio</h2>
           <p className="text-luna-silver">
-            Extract and transcribe audio from YouTube or upload your own files
+            Extract and transcribe audio from a video URL or upload your own files
           </p>
         </div>
       </GlassCard>
@@ -209,11 +209,11 @@ export default function TranscribeTab() {
       <GlassCard>
         <div className="flex gap-2 p-1 bg-black/20 rounded-full">
           <Button
-            onClick={() => setMode('youtube')}
-            variant={mode === 'youtube' ? 'primary' : 'secondary'}
+            onClick={() => setMode('url')}
+            variant={mode === 'url' ? 'primary' : 'secondary'}
             className="flex-1"
           >
-            YouTube URL
+            Video URL
           </Button>
           <Button
             onClick={() => setMode('upload')}
@@ -270,13 +270,13 @@ export default function TranscribeTab() {
             </Button>
             {downloadStatus && <StatusMessage message={downloadStatus} />}
           </>
-        ) : mode === 'youtube' ? (
-          // YouTube URL Mode
+        ) : mode === 'url' ? (
+          // Video URL Mode
           <>
             <Input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="Paste YouTube URL here..."
+              placeholder="Paste video URL (YouTube, Goldcast, etc.)..."
               disabled={isLoading}
             />
 
@@ -459,11 +459,19 @@ export default function TranscribeTab() {
         <div className="space-y-3">
           <h3 className="text-lg font-semibold text-luna-white">Features</h3>
           <ul className="space-y-2 text-luna-silver text-sm">
-            {mode === 'youtube' ? (
+            {mode === 'url' ? (
               <>
                 <li className="flex items-start gap-2">
                   <span className="text-luna-accent-primary">•</span>
-                  <span>Supports multiple audio formats (MP3, WAV, M4A, OPUS)</span>
+                  <span>Supports YouTube, Goldcast, and other video pages yt-dlp can reach</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-luna-accent-primary">•</span>
+                  <span>YouTube videos with captions are transcribed instantly from your browser</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-luna-accent-primary">•</span>
+                  <span>For login-gated pages, use the Record tab while the video plays</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="text-luna-accent-primary">•</span>
@@ -500,7 +508,7 @@ export default function TranscribeTab() {
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-luna-accent-primary">•</span>
-                <span>Drag & drop files or YouTube URLs directly onto this tab</span>
+                <span>Drag & drop files or video URLs directly onto this tab</span>
               </li>
           </ul>
         </div>
