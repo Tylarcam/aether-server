@@ -125,9 +125,9 @@ def web():
                 # Try web client first (works for most public videos), then mobile clients
                 # that bypass the age-gate. None = default (web) client, no --extractor-args.
                 proc = None
-                for client in (None, "ios", "android", "tv_embedded"):
+                for player_client in (None, "ios", "android", "tv_embedded"):
                     proc = subprocess.run(
-                        _yt_dlp_cmd(req.url, out_template, client),
+                        _yt_dlp_cmd(req.url, out_template, player_client),
                         capture_output=True,
                         text=True,
                         timeout=180,

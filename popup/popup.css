@@ -224,6 +224,17 @@ textarea:focus {
   background: rgba(25, 25, 35, 0.6);
 }
 
+.input:-webkit-autofill,
+.input:-webkit-autofill:hover,
+.input:-webkit-autofill:focus,
+.input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px rgba(20, 20, 28, 0.5) inset !important;
+  box-shadow: 0 0 0 1000px rgba(20, 20, 28, 0.5) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  caret-color: var(--text-primary);
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 .input:hover,
 select:hover,
 textarea:hover {

@@ -41,6 +41,24 @@
   --scrollbar-thumb-hover: #4F46E5;
 }
 
+/* Match system preference before JS applies data-theme */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg-base: #F8F8FA;
+    --bg-elevated: #FFFFFF;
+    --bg-card: rgba(255, 255, 255, 0.8);
+    --text-primary: #0F0F14;
+    --text-secondary: #1A1A24;
+    --text-muted: #6B6B7A;
+    --accent-primary: #6366F1;
+    --accent-secondary: #818CF8;
+    --accent-glow: #4F46E5;
+    --border-color: rgba(0, 0, 0, 0.1);
+    --scrollbar-thumb: #6366F1;
+    --scrollbar-thumb-hover: #4F46E5;
+  }
+}
+
 body {
   margin: 0;
   padding: 0;
@@ -86,4 +104,37 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
+}
+
+/* Form fields — explicit colors so text is always readable in both themes */
+.luna-field {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+  caret-color: var(--text-primary);
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 20%, transparent);
+}
+
+.luna-field::placeholder {
+  color: var(--text-muted);
+}
+
+.luna-field:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-primary) 20%, transparent);
+}
+
+.luna-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.luna-field:-webkit-autofill,
+.luna-field:-webkit-autofill:hover,
+.luna-field:-webkit-autofill:focus,
+.luna-field:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-elevated) inset !important;
+  box-shadow: 0 0 0 1000px var(--bg-elevated) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  caret-color: var(--text-primary);
+  transition: background-color 5000s ease-in-out 0s;
 }

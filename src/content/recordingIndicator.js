@@ -291,7 +291,7 @@
     try {
       const result = await chrome.storage.session.get('recordingState');
       const state = result?.recordingState;
-      if (state?.isRecording) {
+      if (state?.isRecording && state.status !== 'Stopping...') {
         showIndicator(state.startTime);
         updateAutoStop(state.videoDuration, state.videoCurrentTime);
       } else if (isVisible) {
@@ -307,7 +307,7 @@
     if (message.type === 'recordingStarted') {
       showIndicator(message.startTime);
     }
-    if (message.type === 'recordingComplete' || message.type === 'recordingError') {
+    if (message.type === 'recordingComplete' || message.type === 'recordingError' || message.type === 'recordingStopping') {
       hideIndicator();
     }
   });

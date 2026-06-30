@@ -4,9 +4,7 @@ export default function Select({ value, onChange, options, className = '', disab
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className={`w-full px-4 py-3 bg-luna-shadow/50 backdrop-blur-md border border-luna-accent-primary/20
-        rounded-lg text-luna-white cursor-pointer
-        focus:border-luna-accent-primary focus:ring-2 focus:ring-luna-accent-primary/20
+      className={`luna-field w-full px-4 py-3 backdrop-blur-md rounded-lg cursor-pointer
         outline-none transition-all appearance-none
         disabled:opacity-50 disabled:cursor-not-allowed
         ${className}`}
@@ -18,7 +16,7 @@ export default function Select({ value, onChange, options, className = '', disab
       }}
     >
       {options.map(opt => (
-        <option key={opt.value} value={opt.value} style={{ backgroundColor: '#1a1a2e', color: '#E0E0FF' }}>
+        <option key={opt.value} value={opt.value}>
           {opt.label}
         </option>
       ))}

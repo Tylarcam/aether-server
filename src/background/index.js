@@ -1,6 +1,9 @@
 // Background Service Worker
 
+import { isValidYouTubeUrl, getYouTubeVideoId, normalizeYouTubeWatchUrl } from '@utils/validators';
+
 const AETHER_API_URL = 'https://tylarcam--aether-transcribe-web.modal.run';
+const LOCAL_SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY || '';
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -39,6 +42,26 @@ async function closeOffscreenDocument() {
   } catch (_) {
     // Already closed or never opened — ignore
   }
+}
+
+// Send a message to the offscreen recorder, verifying the document exists first
+async function sendToOffscreen(message) {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
+  });
+  if (!contexts.length) {
+    throw new Error('Offscreen recorder not available');
+  }
+  return chrome.runtime.sendMessage({ target: 'offscreen', ...message });
+}
+
+// Shared stop flow — used by manual stop and video-end auto-stop
+async function handleStopRecording() {
+  await chrome.storage.session.set({
+    recordingState: { isRecording: false, status: 'Stopping...' }
+  });
+  chrome.runtime.sendMessage({ type: 'recordingStopping' }).catch(() => {});
+  await sendToOffscreen({ type: 'stopRecording' });
 }
 
 async function injectVideoWatcher(tabId) {
@@ -299,39 +322,215 @@ async function showNotification(jobId, title, message, type = 'basic') {
 }
 
 // The injected caption-extraction function (runs in MAIN world on the YouTube page).
-// Reads ytInitialPlayerResponse, fetches the timed-text JSON using the page's session cookies.
+// YouTube timedtext URLs now require player-generated PoTokens (pot=). Direct fetches of
+// captionTracks[].baseUrl return HTTP 200 with an empty body. We drive the YouTube player
+// captions module and reuse the player-generated json3 URL (or intercept the fetch).
 async function _extractCaptionsInPage(expectedVideoId) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function textFromJson3Events(events) {
+    return (events || [])
+      .filter((event) => event?.segs)
+      .map((event) => event.segs.map((seg) => seg.utf8 || '').join(''))
+      .join(' ')
+      .replace(/[\n\r\uFEFF]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function parseJson3(text) {
+    if (!text) return null;
+    try {
+      const data = JSON.parse(text);
+      const transcript = textFromJson3Events(data.events);
+      return transcript || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function timedtextUrlMatchesVideo(url) {
+    try {
+      return new URL(url, location.origin).searchParams.get('v') === expectedVideoId;
+    } catch {
+      return false;
+    }
+  }
+
+  function captionTrackToPlayerTrack(track) {
+    if (!track?.languageCode) return null;
+    const name = track.name?.simpleText
+      || (Array.isArray(track.name?.runs) ? track.name.runs.map((run) => run?.text || '').join('') : '')
+      || track.languageCode;
+    return {
+      displayName: name,
+      id: null,
+      is_default: false,
+      is_servable: false,
+      is_translateable: !!track.isTranslatable,
+      kind: track.kind || '',
+      languageCode: track.languageCode,
+      languageName: name,
+      name: '',
+      vss_id: track.vssId || `${track.kind === 'asr' ? 'a.' : '.'}${track.languageCode}`,
+    };
+  }
+
+  function getTrackCandidates(player) {
+    const tracklist = player?.getOption?.('captions', 'tracklist');
+    if (Array.isArray(tracklist) && tracklist.length > 0) return tracklist;
+
+    const playerResponse = player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+    const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!Array.isArray(captionTracks)) return [];
+    return captionTracks.map(captionTrackToPlayerTrack).filter(Boolean);
+  }
+
+  function pickTrack(tracklist) {
+    if (!Array.isArray(tracklist) || !tracklist.length) return null;
+    return tracklist.find((track) => track.languageCode === 'en' && track.kind !== 'asr')
+      || tracklist.find((track) => track.languageCode === 'en')
+      || tracklist.find((track) => track.kind !== 'asr')
+      || tracklist[0];
+  }
+
+  function isJson3TimedtextUrl(url, track) {
+    if (!url || !url.includes('/api/timedtext')) return false;
+    if (!url.includes('fmt=json3')) return false;
+    if (!url.includes('pot=')) return false;
+    if (!timedtextUrlMatchesVideo(url)) return false;
+    if (!track?.languageCode) return true;
+    try {
+      const parsed = new URL(url, location.origin);
+      const got = String(parsed.searchParams.get('lang') || '').toLowerCase();
+      const wanted = String(track.languageCode || '').toLowerCase();
+      const gotBase = got.split('-')[0];
+      const wantedBase = wanted.split('-')[0];
+      return got === wanted || gotBase === wantedBase || wantedBase === got;
+    } catch {
+      return false;
+    }
+  }
+
+  function findTimedtextUrl(track) {
+    const urls = performance.getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .filter((url) => isJson3TimedtextUrl(url, track));
+    return urls.length ? urls[urls.length - 1] : '';
+  }
+
+  async function fetchTimedtextUrl(url) {
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) return null;
+    return parseJson3(await resp.text());
+  }
+
+  // Legacy path: works only when YouTube has not enabled PoToken on this video.
   const pr = window.ytInitialPlayerResponse;
-  if (!pr || pr.videoDetails?.videoId !== expectedVideoId) return null;
+  if (pr?.videoDetails?.videoId === expectedVideoId) {
+    const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (tracks?.length) {
+      const track = tracks.find((t) => t.languageCode === 'en' && t.kind !== 'asr')
+        || tracks.find((t) => t.languageCode === 'en')
+        || tracks[0];
+      if (track?.baseUrl && !track.baseUrl.includes('exp=xpe')) {
+        const legacyText = await fetchTimedtextUrl(`${track.baseUrl}&fmt=json3`);
+        if (legacyText) return legacyText;
+      }
+    }
+  }
 
-  const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  if (!tracks?.length) return null;
+  const player = document.getElementById('movie_player');
+  if (!player?.getOption || !player?.setOption) return null;
 
-  // Prefer manual English captions, then auto-generated, then first available
-  const track =
-    tracks.find(t => t.languageCode === 'en' && t.kind !== 'asr') ||
-    tracks.find(t => t.languageCode === 'en') ||
-    tracks[0];
+  let track = null;
+  for (let i = 0; i < 20; i += 1) {
+    track = pickTrack(getTrackCandidates(player));
+    if (track) break;
+    await sleep(500);
+  }
+  if (!track) return null;
 
-  if (!track?.baseUrl) return null;
+  const originalFetch = globalThis.fetch;
+  const boundOriginalFetch = originalFetch?.bind(globalThis);
+  const OriginalXHR = globalThis.XMLHttpRequest;
+  let capturedJson3Text = '';
 
-  const resp = await fetch(track.baseUrl + '&fmt=json3');
-  if (!resp.ok) return null;
+  try {
+    if (boundOriginalFetch) {
+      globalThis.fetch = async (...args) => {
+        const response = await boundOriginalFetch(...args);
+        try {
+          const req = args[0];
+          const reqUrl = typeof req === 'string' ? req : req?.url || '';
+          if (isJson3TimedtextUrl(reqUrl, track) && response?.ok) {
+            const text = await response.clone().text();
+            if (text && !capturedJson3Text) capturedJson3Text = text;
+          }
+        } catch {
+          // Ignore capture errors — polling fallback still runs.
+        }
+        return response;
+      };
+    }
 
-  const data = await resp.json();
-  const text = (data.events || [])
-    .filter(e => e.segs)
-    .map(e => e.segs.map(s => s.utf8 || '').join(''))
-    .join(' ')
-    .replace(/[\n\r﻿]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    if (OriginalXHR) {
+      globalThis.XMLHttpRequest = class TimedtextCaptureXHR extends OriginalXHR {
+        open(method, url, ...rest) {
+          this.__aetherTimedtextUrl = typeof url === 'string' ? url : '';
+          return super.open(method, url, ...rest);
+        }
 
-  return text || null;
+        send(...args) {
+          this.addEventListener('load', () => {
+            try {
+              const url = this.__aetherTimedtextUrl || this.responseURL || '';
+              if (!isJson3TimedtextUrl(url, track)) return;
+              if (this.status < 200 || this.status >= 300) return;
+              const text = typeof this.responseText === 'string' ? this.responseText : '';
+              if (text && !capturedJson3Text) capturedJson3Text = text;
+            } catch {
+              // Ignore capture errors — polling fallback still runs.
+            }
+          });
+          return super.send(...args);
+        }
+      };
+    }
+
+    try { player.loadModule?.('captions'); } catch { /* module may already be loaded */ }
+    await sleep(500);
+    try { player.setOption('captions', 'track', track); } catch { /* best effort */ }
+    try {
+      player.mute?.();
+      player.playVideo?.();
+    } catch { /* autoplay may be blocked — timedtext can still load */ }
+
+    for (let i = 0; i < 30; i += 1) {
+      await sleep(500);
+
+      if (capturedJson3Text) {
+        const capturedText = parseJson3(capturedJson3Text);
+        if (capturedText) return capturedText;
+      }
+
+      const timedtextUrl = findTimedtextUrl(track);
+      if (timedtextUrl) {
+        const fetchedText = await fetchTimedtextUrl(timedtextUrl);
+        if (fetchedText) return fetchedText;
+      }
+    }
+
+    return null;
+  } finally {
+    try { player.pauseVideo?.(); } catch { /* ignore */ }
+    if (originalFetch) globalThis.fetch = originalFetch;
+    if (OriginalXHR) globalThis.XMLHttpRequest = OriginalXHR;
+  }
 }
 
-// Wait for ytInitialPlayerResponse to be populated in a tab (polls until ready or timeout).
-async function _waitForPlayerResponse(tabId, videoId, timeoutMs = 12000) {
+// Wait for YouTube player + ytInitialPlayerResponse before caption extraction.
+async function _waitForPlayerResponse(tabId, videoId, timeoutMs = 22000) {
   const pollInterval = 800;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -340,12 +539,17 @@ async function _waitForPlayerResponse(tabId, videoId, timeoutMs = 12000) {
       world: 'MAIN',
       func: (vid) => {
         const pr = window.ytInitialPlayerResponse;
-        return pr?.videoDetails?.videoId === vid ? 'ready' : 'waiting';
+        const player = document.getElementById('movie_player');
+        const prReady = pr?.videoDetails?.videoId === vid;
+        const playerReady = !!(player?.getOption && player?.setOption);
+        if (prReady && playerReady) return 'ready';
+        if (prReady) return 'player-waiting';
+        return 'waiting';
       },
       args: [videoId]
     }).catch(() => null);
     if (results?.[0]?.result === 'ready') return true;
-    await new Promise(r => setTimeout(r, pollInterval));
+    await new Promise((r) => setTimeout(r, pollInterval));
   }
   return false;
 }
@@ -357,24 +561,25 @@ async function _waitForPlayerResponse(tabId, videoId, timeoutMs = 12000) {
 async function tryGetCaptionsFromTab(url) {
   let tempTabId = null;
   try {
-    const videoId = new URL(url).searchParams.get('v');
+    const videoId = getYouTubeVideoId(url);
     if (!videoId) return null;
 
+    const watchUrl = normalizeYouTubeWatchUrl(url);
     let tabs = await chrome.tabs.query({ url: `https://www.youtube.com/watch?v=${videoId}*` });
     let tabId;
 
     if (tabs.length) {
       tabId = tabs[0].id;
     } else {
-      // Open a background tab so the user's session loads the video
-      const newTab = await chrome.tabs.create({ url, active: false });
+      const newTab = await chrome.tabs.create({ url: watchUrl, active: false });
       tempTabId = newTab.id;
       tabId = newTab.id;
-
-      // Wait for YouTube's JS to initialize ytInitialPlayerResponse
-      const ready = await _waitForPlayerResponse(tabId, videoId);
-      if (!ready) return null;
+      await chrome.tabs.update(tabId, { muted: true }).catch(() => {});
     }
+
+    // Always wait — existing tabs may still be loading player data
+    const ready = await _waitForPlayerResponse(tabId, videoId);
+    if (!ready) return null;
 
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -396,40 +601,99 @@ async function tryGetCaptionsFromTab(url) {
   }
 }
 
-// Handle YouTube URL transcription.
-// Strategy: captions first (instant, works for age-restricted), then Modal yt-dlp fallback.
-async function transcribeYouTubeUrl(jobId, url) {
+// YouTube fallback via local server (yt-dlp + Groq on your machine — uses residential IP).
+async function tryLocalServerYouTubeTranscription(url) {
   try {
-    await updateJobProgress(jobId, {
-      status: 'extracting',
-      message: '🔍 Checking for captions...',
-      progress: 10
+    const extractResp = await fetch(`${LOCAL_SERVER_URL}/api/extract-audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, format: 'mp3' })
     });
+    if (!extractResp.ok) return null;
 
-    // Caption path: reads directly from the open YouTube tab's page context.
-    // Instant, zero server cost, and bypasses age restrictions because the user is signed in.
-    const captionText = await tryGetCaptionsFromTab(url);
-    if (captionText) {
+    const { audioUrl } = await extractResp.json();
+    if (!audioUrl) return null;
+
+    const transcribeResp = await fetch(`${LOCAL_SERVER_URL}/api/transcribe-groq`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audioUrl })
+    });
+    if (!transcribeResp.ok) return null;
+
+    const data = await transcribeResp.json();
+    return data.text?.trim() || null;
+  } catch (err) {
+    console.warn('[local-server]', err.message);
+    return null;
+  }
+}
+
+// Handle URL transcription (YouTube + other video pages via yt-dlp).
+// YouTube: captions first (instant, works for age-restricted), then local server, then Modal.
+// Other URLs: skip caption path, go straight to Modal yt-dlp.
+async function transcribeUrl(jobId, url) {
+  const isYouTube = isValidYouTubeUrl(url);
+
+  try {
+    if (isYouTube) {
       await updateJobProgress(jobId, {
-        status: 'completed',
-        message: '✅ Transcription complete!',
-        progress: 100,
-        result: captionText,
-        sourceType: 'url'
+        status: 'extracting',
+        message: '🔍 Checking for captions...',
+        progress: 10
       });
-      await showNotification(jobId, 'Transcription Complete', 'YouTube captions extracted successfully!');
-      saveToHistory(captionText, url, 'url', 'captions');
-      activeJobs.delete(jobId);
-      stopKeepAlive();
-      return;
+
+      const captionText = await tryGetCaptionsFromTab(url);
+      if (captionText) {
+        await updateJobProgress(jobId, {
+          status: 'completed',
+          message: '✅ Transcription complete!',
+          progress: 100,
+          result: captionText,
+          sourceType: 'url'
+        });
+        await showNotification(jobId, 'Transcription Complete', 'YouTube captions extracted successfully!');
+        saveToHistory(captionText, url, 'url', 'captions');
+        activeJobs.delete(jobId);
+        stopKeepAlive();
+        return;
+      }
+    } else {
+      await updateJobProgress(jobId, {
+        status: 'extracting',
+        message: '📥 Extracting audio from page...',
+        progress: 10
+      });
     }
 
-    // Audio path: yt-dlp on Modal + Groq Whisper.
-    // Works for public videos; age-restricted ones need the tab open (caption path above).
+    if (isYouTube) {
+      await updateJobProgress(jobId, {
+        status: 'extracting',
+        message: '📥 Trying local server (yt-dlp)...',
+        progress: 15
+      });
+
+      const localTranscript = await tryLocalServerYouTubeTranscription(url);
+      if (localTranscript) {
+        await updateJobProgress(jobId, {
+          status: 'completed',
+          message: '✅ Transcription complete!',
+          progress: 100,
+          result: localTranscript,
+          sourceType: 'url'
+        });
+        await showNotification(jobId, 'Transcription Complete', 'YouTube video transcribed via local server!');
+        saveToHistory(localTranscript, url, 'url', 'local');
+        activeJobs.delete(jobId);
+        stopKeepAlive();
+        return;
+      }
+    }
+
     await updateJobProgress(jobId, {
       status: 'extracting',
       message: '📥 Extracting and transcribing audio...',
-      progress: 15
+      progress: 20
     });
 
     let response;
@@ -450,13 +714,17 @@ async function transcribeYouTubeUrl(jobId, url) {
 
     const data = await response.json();
     if (!data.success) {
-      const serverBlocked = data.error?.toLowerCase().includes('blocking') || data.error?.toLowerCase().includes('bot');
-      if (serverBlocked) {
-        throw new Error("This video has no captions and server-side audio extraction is blocked by YouTube.\n\nTo transcribe it: play the video in a YouTube tab, then use Aether's Record tab to capture the audio.");
-      }
-      const isAgeRestricted = data.error?.toLowerCase().includes('age');
-      if (isAgeRestricted) {
-        throw new Error('This video is age-restricted. Sign in to YouTube, open the video, then paste the URL again — Aether will extract captions using your session.');
+      if (isYouTube) {
+        const serverBlocked = data.error?.toLowerCase().includes('blocking') || data.error?.toLowerCase().includes('bot');
+        if (serverBlocked) {
+          throw new Error("Could not read captions from your browser, and YouTube blocks cloud server-side extraction.\n\nTry this:\n• Open the video in a YouTube tab (captions/CC enabled), then paste the URL again\n• Make sure npm run server is running with yt-dlp installed (uses your home IP)\n• For videos without captions, use the Record tab while the video plays");
+        }
+        const isAgeRestricted = data.error?.toLowerCase().includes('age');
+        if (isAgeRestricted) {
+          throw new Error('This video is age-restricted. Sign in to YouTube, open the video, then paste the URL again — Aether will extract captions using your session.');
+        }
+      } else {
+        throw new Error(`${data.error || 'Could not extract audio from this URL.'}\n\nTip: open the page in a browser tab and use Aether's Record tab to capture the audio directly.`);
       }
       throw new Error(data.error || 'Transcription failed');
     }
@@ -469,7 +737,8 @@ async function transcribeYouTubeUrl(jobId, url) {
       sourceType: 'url'
     });
 
-    await showNotification(jobId, 'Transcription Complete', 'YouTube video transcribed successfully!');
+    const notifyMsg = isYouTube ? 'YouTube video transcribed successfully!' : 'Page audio transcribed successfully!';
+    await showNotification(jobId, 'Transcription Complete', notifyMsg);
     saveToHistory(data.transcript, url, 'url', 'aether');
     activeJobs.delete(jobId);
     stopKeepAlive();
@@ -791,13 +1060,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         const prefs = await chrome.storage.sync.get(['audio_input_device_id', 'audio_input_auto_detect']);
         // Forward stream ID and device prefs to the offscreen document
-        chrome.runtime.sendMessage({
-          target: 'offscreen',
+        const offscreenResult = await sendToOffscreen({
           type: 'startRecording',
           streamId,
           deviceId: prefs.audio_input_device_id || 'default',
           autoDetect: prefs.audio_input_auto_detect ?? true
         });
+        if (offscreenResult?.error) {
+          throw new Error(offscreenResult.error);
+        }
         // Notify all content scripts so the floating indicator appears immediately
         chrome.runtime.sendMessage({ type: 'recordingStarted', startTime }).catch(() => {});
         if (targetTabId) {
@@ -812,9 +1083,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'stopRecording') {
-    chrome.runtime.sendMessage({ target: 'offscreen', type: 'stopRecording' })
-      .catch((err) => console.warn('[background] stopRecording relay failed:', err));
-    sendResponse({ success: true });
+    (async () => {
+      try {
+        await handleStopRecording();
+        sendResponse({ success: true });
+      } catch (err) {
+        console.error('[background] stopRecording failed:', err);
+        await chrome.storage.session.set({
+          recordingState: { isRecording: false, status: `Error: ${err.message}` }
+        });
+        chrome.runtime.sendMessage({ type: 'recordingError', error: err.message }).catch(() => {});
+        sendResponse({ error: err.message });
+      }
+    })();
     return true;
   }
 
@@ -935,11 +1216,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'videoEnded') {
-    chrome.storage.session.get('recordingState', (res) => {
+    (async () => {
+      const res = await chrome.storage.session.get('recordingState');
       if (!res.recordingState?.isRecording) return;
-      chrome.runtime.sendMessage({ target: 'offscreen', type: 'stopRecording' })
-        .catch((err) => console.warn('[background] videoEnded stopRecording relay failed:', err));
-    });
+      try {
+        await handleStopRecording();
+      } catch (err) {
+        console.warn('[background] videoEnded stopRecording failed:', err);
+      }
+    })();
     sendResponse({ ok: true });
     return false;
   }
@@ -973,7 +1258,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const groqKey = res.groq_api_key || GROQ_API_KEY;
 
       if (message.source === 'url') {
-        transcribeYouTubeUrl(jobId, message.url);
+        transcribeUrl(jobId, message.url);
       } else if (message.source === 'file') {
         if (!message.fileData) {
           sendResponse({ error: 'File data not provided' });

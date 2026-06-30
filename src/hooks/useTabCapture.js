@@ -38,7 +38,7 @@ export function useTabCapture() {
       const state = result.recordingState;
       if (!state) return;
 
-      setIsRecording(state.isRecording);
+      setIsRecording(!!state.isRecording && state.status !== 'Stopping...');
       if (state.status) setStatus(state.status);
 
       setVideoDuration(state.videoDuration ?? null);
@@ -69,6 +69,15 @@ export function useTabCapture() {
           analyserDataRef.current = new Uint8Array(message.data.length);
         }
         analyserDataRef.current.set(message.data);
+        return;
+      }
+
+      if (message.type === 'recordingStopping') {
+        setIsRecording(false);
+        setStatus('⏹️ Stopping...');
+        analyserDataRef.current = null;
+        startTimeRef.current = null;
+        setElapsedTime(0);
         return;
       }
 
@@ -174,13 +183,16 @@ export function useTabCapture() {
     });
   }, []);
 
-  const stopRecording = useCallback(async () => {
-    try {
-      setStatus('⏹️ Stopping...');
-      await chrome.runtime.sendMessage({ type: 'stopRecording' });
-    } catch (err) {
-      setStatus(`❌ Failed to stop: ${err.message}`);
-    }
+  const stopRecording = useCallback(() => {
+    setIsRecording(false);
+    analyserDataRef.current = null;
+    startTimeRef.current = null;
+    setStatus('⏹️ Stopping...');
+    chrome.runtime.sendMessage({ type: 'stopRecording' }, (response) => {
+      if (chrome.runtime.lastError || response?.error) {
+        setStatus(`❌ Failed to stop: ${response?.error || chrome.runtime.lastError?.message}`);
+      }
+    });
   }, []);
 
   return {

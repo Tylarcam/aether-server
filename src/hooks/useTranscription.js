@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { isValidYouTubeUrl } from '@utils/validators';
+import { isValidUrl } from '@utils/validators';
 import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats } from '@utils/fileValidators';
 
 export function useTranscription() {
@@ -116,8 +116,8 @@ export function useTranscription() {
   }, []);
 
   const transcribe = async (url, format = 'mp3') => {
-    if (!isValidYouTubeUrl(url)) {
-      setStatus('❌ Invalid YouTube URL');
+    if (!isValidUrl(url)) {
+      setStatus('❌ Invalid URL — paste a full http:// or https:// link');
       return;
     }
 
