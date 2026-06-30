@@ -1,6 +1,7 @@
 // Background Service Worker
 
 import { isValidYouTubeUrl, getYouTubeVideoId, normalizeYouTubeWatchUrl } from '@utils/validators';
+import { normalizeRecordingFormat, DEFAULT_RECORDING_OUTPUT_FORMAT } from '@utils/recordingFormats';
 
 const AETHER_API_URL = 'https://tylarcam--aether-transcribe-web.modal.run';
 const LOCAL_SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
@@ -111,39 +112,52 @@ async function injectVideoWatcher(tabId) {
 
 function openRecordingsIDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('aether_recordings', 1);
+    const req = indexedDB.open('aether_recordings', 2);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore('blobs');
+      if (!e.target.result.objectStoreNames.contains('blobs')) {
+        e.target.result.createObjectStore('blobs');
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-async function getBlobFromIDB(filename) {
+function normalizeRecordingRecord(record) {
+  if (!record) return null;
+  if (record instanceof Blob) {
+    return { blob: record, mimeType: record.type || 'audio/webm' };
+  }
+  if (record.blob instanceof Blob) {
+    return {
+      blob: record.blob,
+      mimeType: record.mimeType || record.blob.type || 'audio/webm'
+    };
+  }
+  return null;
+}
+
+async function getRecordingFromIDB(filename) {
   const db = await openRecordingsIDB();
-  const blob = await new Promise((resolve, reject) => {
+  const record = await new Promise((resolve, reject) => {
     const tx = db.transaction('blobs', 'readonly');
     const req = tx.objectStore('blobs').get(filename);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
     tx.oncomplete = () => db.close();
   });
-  if (!blob) throw new Error('Recording blob not found in IDB');
+  const normalized = normalizeRecordingRecord(record);
+  if (!normalized) throw new Error('Recording blob not found in IDB');
+  return normalized;
+}
+
+async function getBlobFromIDB(filename) {
+  const { blob } = await getRecordingFromIDB(filename);
   return blob;
 }
 
 async function downloadBlobFromIDB(filename) {
-  const db = await openRecordingsIDB();
-  const blob = await new Promise((resolve, reject) => {
-    const tx = db.transaction('blobs', 'readwrite');
-    const getReq = tx.objectStore('blobs').get(filename);
-    getReq.onsuccess = () => resolve(getReq.result);
-    getReq.onerror = () => reject(getReq.error);
-    tx.oncomplete = () => db.close();
-  });
-
-  if (!blob) throw new Error('Recording blob not found in IDB');
+  const { blob } = await getRecordingFromIDB(filename);
 
   // URL.createObjectURL is not available in MV3 extension service workers.
   // Convert the blob to a base64 data URL entirely within the SW using
@@ -1058,13 +1072,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             videoCurrentTime: null
           }
         });
-        const prefs = await chrome.storage.sync.get(['audio_input_device_id', 'audio_input_auto_detect']);
+        const prefs = await chrome.storage.sync.get([
+          'audio_input_device_id',
+          'audio_input_auto_detect',
+          'recording_output_format'
+        ]);
         // Forward stream ID and device prefs to the offscreen document
         const offscreenResult = await sendToOffscreen({
           type: 'startRecording',
           streamId,
           deviceId: prefs.audio_input_device_id || 'default',
-          autoDetect: prefs.audio_input_auto_detect ?? true
+          autoDetect: prefs.audio_input_auto_detect ?? true,
+          outputFormat: normalizeRecordingFormat(
+            prefs.recording_output_format || DEFAULT_RECORDING_OUTPUT_FORMAT
+          )
         });
         if (offscreenResult?.error) {
           throw new Error(offscreenResult.error);
@@ -1107,10 +1128,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { filename } = message;
     (async () => {
       try {
-        const blob = await getBlobFromIDB(filename);
+        const { blob, mimeType } = await getRecordingFromIDB(filename);
         const dataUrl = await blobToDataUrl(blob);
         const base64 = dataUrl.split(',')[1];
-        const fileData = { name: filename, type: blob.type || 'audio/webm', size: blob.size, data: base64 };
+        const fileData = {
+          name: filename,
+          type: mimeType || blob.type || 'audio/wav',
+          size: blob.size,
+          data: base64
+        };
 
         // Download audio to local device — user keeps the file even if transcription fails
         await new Promise((resolve) => {

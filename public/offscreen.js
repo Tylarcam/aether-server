@@ -9,13 +9,14 @@ let analyserInterval = null;
 let captureStream = null;
 let lastAudioActivity = Date.now();
 let isStopping = false;
+let outputFormat = 'wav';
 
 // Only handle messages targeted at this offscreen document
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.target !== 'offscreen') return;
 
   if (message.type === 'startRecording') {
-    startRecording(message.streamId)
+    startRecording(message.streamId, message.outputFormat)
       .then(() => sendResponse({ success: true }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -50,10 +51,12 @@ function abandonExistingRecording() {
   cleanup();
 }
 
-async function startRecording(streamId) {
+async function startRecording(streamId, format = 'wav') {
   if (mediaRecorder || captureStream) {
     abandonExistingRecording();
   }
+
+  outputFormat = format || 'wav';
 
   captureStream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -160,7 +163,7 @@ async function encodeAndSave() {
   try {
     stopCaptureTracks();
 
-    console.log('[offscreen] saving', audioChunks.length, 'chunks as WebM...');
+    console.log('[offscreen] saving', audioChunks.length, 'chunks, output format:', outputFormat);
     const webmBlob = new Blob(audioChunks, { type: 'audio/webm' });
     console.log('[offscreen] webm blob size:', (webmBlob.size / 1024 / 1024).toFixed(1), 'MB');
 
@@ -173,10 +176,13 @@ async function encodeAndSave() {
       return;
     }
 
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
-    const filename = `recording-${ts}.webm`;
+    const { blob, mimeType, ext } = await convertWebmToFormat(webmBlob, outputFormat);
+    console.log('[offscreen] exported', ext, 'size:', (blob.size / 1024 / 1024).toFixed(1), 'MB');
 
-    await storeBlobInIDB(webmBlob, filename);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    const filename = `recording-${ts}.${ext}`;
+
+    await storeBlobInIDB(blob, filename, mimeType);
 
     chrome.runtime.sendMessage({ type: 'saveRecording', filename }, (response) => {
       if (chrome.runtime.lastError || response?.error) {
@@ -197,16 +203,18 @@ async function encodeAndSave() {
   }
 }
 
-function storeBlobInIDB(blob, key) {
+function storeBlobInIDB(blob, key, mimeType = 'application/octet-stream') {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('aether_recordings', 1);
+    const req = indexedDB.open('aether_recordings', 2);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore('blobs');
+      if (!e.target.result.objectStoreNames.contains('blobs')) {
+        e.target.result.createObjectStore('blobs');
+      }
     };
     req.onsuccess = (e) => {
       const db = e.target.result;
       const tx = db.transaction('blobs', 'readwrite');
-      tx.objectStore('blobs').put(blob, key);
+      tx.objectStore('blobs').put({ blob, mimeType }, key);
       tx.oncomplete = () => { db.close(); resolve(); };
       tx.onerror = () => { db.close(); reject(tx.error); };
     };

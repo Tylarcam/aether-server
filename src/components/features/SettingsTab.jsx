@@ -3,6 +3,7 @@ import { Save, Eye, EyeOff, ExternalLink, Trash2, Sun, Moon, Monitor, Mic, MicOf
 import { useStorage } from '@/hooks/useStorage';
 import { useTheme } from '@/hooks/useTheme';
 import { useAudioDevices } from '@/hooks/useAudioDevices';
+import { RECORDING_FORMAT_OPTIONS, DEFAULT_RECORDING_OUTPUT_FORMAT } from '@/utils/recordingFormats';
 import GlassCard from '@/components/layout/GlassCard';
 import Button from '@/components/shared/Button';
 import Input from '@/components/shared/Input';
@@ -20,6 +21,10 @@ export default function SettingsTab() {
   const [transcriptionService, setTranscriptionService] = useState('groq');
   const [whisperModel, setWhisperModel] = useState('tiny');
   const [modalWhisperUrl, setModalWhisperUrl] = useState('');
+  const [recordingOutputFormat, setRecordingOutputFormat] = useStorage(
+    'recording_output_format',
+    DEFAULT_RECORDING_OUTPUT_FORMAT
+  );
   const { theme, setTheme } = useTheme();
   const {
     devices,
@@ -415,6 +420,45 @@ export default function SettingsTab() {
               </div>
             </div>
           )}
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-luna-white">Recording Output Format</h3>
+            <span className="text-xs text-luna-accent-primary bg-luna-accent-primary/10 px-2 py-1 rounded">
+              Auto-saves
+            </span>
+          </div>
+          <p className="text-sm text-luna-silver">
+            Choose the audio file format saved to Downloads after tab recording. WAV works everywhere on Mac and Windows.
+          </p>
+
+          <div>
+            <label className="block text-sm font-medium text-luna-white mb-2">
+              Saved Recording Format
+            </label>
+            <Select
+              value={recordingOutputFormat}
+              onChange={(value) => setRecordingOutputFormat(value)}
+              options={RECORDING_FORMAT_OPTIONS}
+            />
+            <p className="text-xs text-luna-silver mt-2">
+              {recordingOutputFormat === 'wav'
+                ? 'Uncompressed PCM audio — best compatibility for playback and editing.'
+                : recordingOutputFormat === 'mp3'
+                  ? 'Compressed audio — smaller files, supported by most players.'
+                  : 'Native browser capture format — smallest files, fewer desktop players support it.'}
+            </p>
+          </div>
+
+          <div className="bg-luna-accent-primary/10 border border-luna-accent-primary/20 rounded-lg p-3">
+            <p className="text-xs text-luna-white">
+              <strong>Current Format:</strong>{' '}
+              <span className="text-luna-accent-primary uppercase">{recordingOutputFormat}</span>
+            </p>
+          </div>
         </div>
       </GlassCard>
 
