@@ -20,8 +20,23 @@ export function searchHistoryItem(item, query) {
     return true;
   }
 
+  // Search in CEO Brief (secondary artifact)
+  if (item.ceoBrief && item.ceoBrief.toLowerCase().includes(searchTerm)) {
+    return true;
+  }
+
   // Search in file name
   if (item.fileName && item.fileName.toLowerCase().includes(searchTerm)) {
+    return true;
+  }
+
+  // Search in title / topic
+  if (item.title && item.title.toLowerCase().includes(searchTerm)) {
+    return true;
+  }
+
+  // Search in author / publisher
+  if (item.author && item.author.toLowerCase().includes(searchTerm)) {
     return true;
   }
 

@@ -33,7 +33,11 @@ export function isValidWhisperFile(file) {
   return WHISPER_FILE_EXTENSIONS.some(ext => fileName.endsWith(ext));
 }
 
-export function isValidFileSize(file, maxSizeMB = 25) {
+// Groq's API cap is ~25 MB, but Aether auto-compresses (and chunks) larger
+// interviews before transcription. Cap is upload/memory, not STT.
+export const MAX_UPLOAD_MB = 200;
+
+export function isValidFileSize(file, maxSizeMB = MAX_UPLOAD_MB) {
   if (!file) return false;
   const sizeMB = file.size / (1024 * 1024);
   return sizeMB <= maxSizeMB;

@@ -1,5 +1,22 @@
 # Quick Start Guide - Whisper Transcription
 
+## Large files (auto-compress)
+
+Files over Groq's ~24 MB limit are handled automatically:
+
+1. Detect oversized audio
+2. Compress to mono 16 kHz 32 kbps MP3 via ffmpeg
+3. If still over the limit, split into 10-minute chunks
+4. Transcribe each chunk and return one concatenated transcript
+
+This runs on the **local server** (`npm run server`) and on the **Modal** backend (`backend/modal_aether.py`). The extension shows "Large file — compressing…" and returns the transcript when done. No manual conversion required.
+
+Redeploy Modal after pulling this change:
+
+```bash
+modal deploy backend/modal_aether.py
+```
+
 ## Starting the Server
 
 The extension requires a local server to be running for Whisper transcription.

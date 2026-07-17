@@ -4,7 +4,8 @@
 
 import 'dotenv/config';
 import express from 'express';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
+import { promisify } from 'util';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
@@ -24,17 +25,101 @@ const AUDIO_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // check hourly
 
 if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR);
 
-// Configure multer for file uploads
-const upload = multer({ 
+// Configure multer for file uploads (large interviews are auto-compressed before Groq)
+const upload = multer({
   dest: AUDIO_DIR,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+  limits: { fileSize: 200 * 1024 * 1024 } // 200MB — compress/chunk before Groq's 24MB cap
 });
+
+const execFileAsync = promisify(execFile);
+const GROQ_MODEL = 'whisper-large-v3-turbo';
+const GROQ_MAX_BYTES = 24 * 1024 * 1024;
+const CHUNK_SECONDS = 600; // 10-min mono 32kbps speech chunks stay under Groq's cap
+const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
+const YTDLP_TIMEOUT_MS = 15 * 60 * 1000;
+
+// yt-dlp binary: on machines with multiple Python installs, plain "yt-dlp" on PATH
+// can resolve to a stale/outdated copy. Override with YTDLP_BIN if needed.
+const YTDLP_BIN = process.env.YTDLP_BIN || 'yt-dlp';
+// Cookie file (Netscape format) to get past YouTube's sign-in wall. Exported from a
+// logged-in browser session via CDP. Never commit this file (see .gitignore).
+const YTDLP_COOKIES_PATH = path.join(__dirname, 'youtube_cookies.txt');
+const YTDLP_COOKIES_ARGS = fs.existsSync(YTDLP_COOKIES_PATH) ? ['--cookies', YTDLP_COOKIES_PATH] : [];
+
+/**
+ * Ensure audio is under Groq's 24 MB limit.
+ * Compresses to mono 16 kHz 32k MP3 when oversized; segments if still too large.
+ * Returns { paths, compressed, workDir } — caller must clean up workDir when set.
+ */
+async function prepareAudioForGroq(sourcePath) {
+  const size = fs.statSync(sourcePath).size;
+  if (size <= GROQ_MAX_BYTES) {
+    return { paths: [sourcePath], compressed: false, workDir: null };
+  }
+
+  const workDir = fs.mkdtempSync(path.join(AUDIO_DIR, 'prep_'));
+  const compressedPath = path.join(workDir, 'compressed.mp3');
+
+  await execFileAsync('ffmpeg', [
+    '-y', '-i', sourcePath,
+    '-vn', '-ac', '1', '-ar', '16000', '-b:a', '32k',
+    compressedPath,
+  ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 });
+
+  if (fs.statSync(compressedPath).size <= GROQ_MAX_BYTES) {
+    return { paths: [compressedPath], compressed: true, workDir };
+  }
+
+  await execFileAsync('ffmpeg', [
+    '-y', '-i', compressedPath,
+    '-vn', '-ac', '1', '-ar', '16000', '-b:a', '32k',
+    '-f', 'segment', '-segment_time', String(CHUNK_SECONDS),
+    path.join(workDir, 'chunk_%04d.mp3'),
+  ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 });
+
+  const chunks = fs.readdirSync(workDir)
+    .filter((f) => f.startsWith('chunk_') && f.endsWith('.mp3'))
+    .sort()
+    .map((f) => path.join(workDir, f));
+
+  if (chunks.length === 0) {
+    throw new Error('ffmpeg produced no audio chunks');
+  }
+
+  return { paths: chunks, compressed: true, workDir };
+}
+
+async function transcribePathsWithGroq(paths, { language, model } = {}) {
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const useModel = model || GROQ_MODEL;
+  const parts = [];
+  for (const chunkPath of paths) {
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(chunkPath),
+      model: useModel,
+      response_format: 'json',
+      ...(language ? { language } : {}),
+    });
+    const text = (transcription.text || '').trim();
+    if (text) parts.push(text);
+  }
+  const text = parts.join('\n\n');
+  if (!text) {
+    throw new Error('Transcription returned no text (silent audio?)');
+  }
+  return { text, model: useModel, chunks: paths.length };
+}
 
 app.use(cors());
 app.use(express.json());
 
 // Health check endpoint
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({
+  status: 'ok',
+  auto_compress: true,
+  max_upload_mb: 200,
+  groq_max_mb: 24,
+}));
 
 // Clean up audio files older than 3 days
 setInterval(() => {
@@ -184,24 +269,25 @@ app.post('/api/transcribe-whisper', upload.single('file'), (req, res) => {
   }, 10 * 60 * 1000);
 });
 
-// Groq Whisper transcription — accepts either a file upload or a filename from /api/extract-audio
+// Groq Whisper — file upload / prior extract-audio path.
+// Auto-compresses (and chunks if needed) when over Groq's 24 MB limit.
 app.post('/api/transcribe-groq', upload.single('file'), async (req, res) => {
-  try {
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  let filePath;
+  let cleanupUpload = false;
+  let workDir = null;
 
-    let filePath;
-    let cleanup = false;
+  try {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(500).json({ error: 'GROQ_API_KEY not configured on the Aether server' });
+    }
 
     if (req.file) {
-      // Direct upload
       filePath = req.file.path;
-      cleanup = true;
+      cleanupUpload = true;
     } else if (req.body.filename) {
-      // Filename from a previous /api/extract-audio response
       const safe = path.basename(req.body.filename);
       filePath = path.join(AUDIO_DIR, safe);
     } else if (req.body.audioUrl) {
-      // Full URL like http://localhost:3000/audio/audio_xyz.mp3 — extract filename
       const safe = path.basename(new URL(req.body.audioUrl).pathname);
       filePath = path.join(AUDIO_DIR, safe);
     } else {
@@ -212,18 +298,132 @@ app.post('/api/transcribe-groq', upload.single('file'), async (req, res) => {
       return res.status(404).json({ error: 'Audio file not found', path: filePath });
     }
 
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(filePath),
-      model: req.body.model || 'whisper-large-v3-turbo',
-      response_format: 'json',
+    const prepared = await prepareAudioForGroq(filePath);
+    workDir = prepared.workDir;
+    const { text, model, chunks } = await transcribePathsWithGroq(prepared.paths, {
+      model: req.body.model,
+      language: req.body.language,
     });
 
-    if (cleanup) fs.unlink(filePath, () => {});
-
-    res.json({ text: transcription.text, model: req.body.model || 'whisper-large-v3-turbo' });
+    res.json({
+      text,
+      transcript: text,
+      model,
+      compressed: prepared.compressed,
+      chunks,
+    });
   } catch (err) {
     console.error('Groq transcription error:', err);
     res.status(500).json({ error: err.message });
+  } finally {
+    if (cleanupUpload && filePath && fs.existsSync(filePath)) {
+      fs.unlink(filePath, () => {});
+    }
+    if (workDir) {
+      fs.rm(workDir, { recursive: true, force: true }, () => {});
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Agent-facing endpoint: URL in, transcript out.
+// yt-dlp (residential IP) → auto-compress/chunk (Groq 24 MB cap) → Groq Whisper.
+// ---------------------------------------------------------------------------
+
+// yt-dlp --print with --no-simulate emits one metadata line to stdout while
+// still downloading. The )j suffix makes yt-dlp print a JSON object.
+const YTDLP_META_TEMPLATE = '%(.{title,duration,channel})j';
+
+function parseYtdlpMeta(stdout) {
+  const line = (stdout || '').split('\n').map(s => s.trim())
+    .find(s => s.startsWith('{') && s.endsWith('}'));
+  if (!line) return { title: null, channel: null, duration_sec: null };
+  try {
+    const meta = JSON.parse(line);
+    return {
+      title: meta.title || null,
+      channel: meta.channel || null,
+      duration_sec: Number.isFinite(meta.duration) ? Math.round(meta.duration) : null,
+    };
+  } catch {
+    return { title: null, channel: null, duration_sec: null };
+  }
+}
+
+app.post('/api/transcribe-url', async (req, res) => {
+  const started = Date.now();
+  const { url, language } = req.body || {};
+
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+    return res.status(400).json({ success: false, error: 'Provide an http(s) url' });
+  }
+  if (!process.env.GROQ_API_KEY) {
+    return res.status(500).json({ success: false, error: 'GROQ_API_KEY not configured on the Aether server' });
+  }
+
+  const jobDir = fs.mkdtempSync(path.join(AUDIO_DIR, 'job_'));
+  const cleanup = () => fs.rm(jobDir, { recursive: true, force: true }, () => {});
+
+  try {
+    // 1. Download audio via yt-dlp (args array — no shell interpolation).
+    const outTemplate = path.join(jobDir, 'source.%(ext)s');
+    let meta = { title: null, channel: null, duration_sec: null };
+    try {
+      const { stdout } = await execFileAsync(YTDLP_BIN, [
+        '--format', 'bestaudio/best',
+        '--extract-audio',
+        '--output', outTemplate,
+        '--no-playlist',
+        '--no-warnings',
+        '--print', YTDLP_META_TEMPLATE,
+        '--no-simulate',
+        ...YTDLP_COOKIES_ARGS,
+        url,
+      ], { timeout: YTDLP_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 });
+      meta = parseYtdlpMeta(stdout);
+    } catch (err) {
+      const stderr = (err.stderr || err.message || '').slice(0, 500);
+      const blocked = /sign in|bot/i.test(stderr);
+      return res.status(422).json({
+        success: false,
+        error: blocked
+          ? 'yt-dlp blocked (sign-in wall). Video may need browser-session captions or the Record tab.'
+          : `Audio extraction failed: ${stderr}`,
+        stage: 'extract',
+      });
+    }
+
+    const sources = fs.readdirSync(jobDir).filter(f => f.startsWith('source.'));
+    if (sources.length === 0) {
+      return res.status(422).json({ success: false, error: 'yt-dlp produced no audio file', stage: 'extract' });
+    }
+    const sourcePath = path.join(jobDir, sources[0]);
+
+    // 2. Auto-compress / chunk under Groq's 24 MB cap, then transcribe.
+    const prepared = await prepareAudioForGroq(sourcePath);
+    const { text, model, chunks } = await transcribePathsWithGroq(prepared.paths, { language });
+    if (prepared.workDir) {
+      fs.rmSync(prepared.workDir, { recursive: true, force: true });
+    }
+
+    res.json({
+      success: true,
+      text,
+      method: 'local_ytdlp_groq',
+      model,
+      title: meta.title,
+      channel: meta.channel,
+      duration_sec: meta.duration_sec,
+      compressed: prepared.compressed,
+      chunks,
+      char_count: text.length,
+      latency_ms: Date.now() - started,
+    });
+  } catch (err) {
+    console.error('transcribe-url error:', err);
+    res.status(500).json({ success: false, error: err.message, stage: 'transcribe' });
+  } finally {
+    cleanup();
   }
 });
 

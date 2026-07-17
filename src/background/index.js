@@ -2,6 +2,9 @@
 
 import { isValidYouTubeUrl, getYouTubeVideoId, normalizeYouTubeWatchUrl } from '@utils/validators';
 import { normalizeRecordingFormat, DEFAULT_RECORDING_OUTPUT_FORMAT } from '@utils/recordingFormats';
+import { saveToHistory, updateHistoryItem, getHistoryItem } from '@utils/history';
+import { generateCeoBrief } from '@utils/ceoBrief';
+import { withYouTubeMetadata } from '@utils/youtubeMetadata';
 
 const AETHER_API_URL = 'https://tylarcam--aether-transcribe-web.modal.run';
 const LOCAL_SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
@@ -543,6 +546,25 @@ async function _extractCaptionsInPage(expectedVideoId) {
   }
 }
 
+// Read YouTube video title + channel from the open watch page.
+function _getYouTubeVideoMetadataInPage(expectedVideoId) {
+  const player = document.getElementById('movie_player');
+  const pr = player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+  const vd = pr?.videoDetails;
+  if (vd?.videoId === expectedVideoId) {
+    const lengthSeconds = Number.parseInt(vd.lengthSeconds, 10);
+    return {
+      title: vd.title || null,
+      author: vd.author || null,
+      ...(Number.isFinite(lengthSeconds) && lengthSeconds > 0
+        ? { durationSec: lengthSeconds }
+        : {}),
+    };
+  }
+  const docTitle = document.title?.replace(/\s*-\s*YouTube\s*$/i, '').trim();
+  return docTitle ? { title: docTitle, author: null } : null;
+}
+
 // Wait for YouTube player + ytInitialPlayerResponse before caption extraction.
 async function _waitForPlayerResponse(tabId, videoId, timeoutMs = 22000) {
   const pollInterval = 800;
@@ -602,7 +624,20 @@ async function tryGetCaptionsFromTab(url) {
       args: [videoId]
     });
 
-    return results?.[0]?.result || null;
+    const captionText = results?.[0]?.result || null;
+    if (!captionText) return null;
+
+    const metaResults = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: _getYouTubeVideoMetadataInPage,
+      args: [videoId]
+    });
+
+    return {
+      text: captionText,
+      metadata: metaResults?.[0]?.result || {},
+    };
   } catch (err) {
     // Scripting blocked, tab crashed, navigated away — fall through to Modal
     console.warn('[captions]', err.message);
@@ -618,29 +653,102 @@ async function tryGetCaptionsFromTab(url) {
 // YouTube fallback via local server (yt-dlp + Groq on your machine — uses residential IP).
 async function tryLocalServerYouTubeTranscription(url) {
   try {
-    const extractResp = await fetch(`${LOCAL_SERVER_URL}/api/extract-audio`, {
+    const response = await fetch(`${LOCAL_SERVER_URL}/api/transcribe-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, format: 'mp3' })
+      body: JSON.stringify({ url }),
     });
-    if (!extractResp.ok) return null;
+    if (!response.ok) return null;
 
-    const { audioUrl } = await extractResp.json();
-    if (!audioUrl) return null;
+    const data = await response.json();
+    if (!data.success || !data.text?.trim()) return null;
 
-    const transcribeResp = await fetch(`${LOCAL_SERVER_URL}/api/transcribe-groq`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioUrl })
-    });
-    if (!transcribeResp.ok) return null;
-
-    const data = await transcribeResp.json();
-    return data.text?.trim() || null;
+    return {
+      text: data.text.trim(),
+      metadata: {
+        title: data.title || null,
+        author: data.channel || null,
+        ...(typeof data.duration_sec === 'number' && data.duration_sec > 0
+          ? { durationSec: data.duration_sec }
+          : {}),
+      },
+    };
   } catch (err) {
     console.warn('[local-server]', err.message);
     return null;
   }
+}
+
+function getGroqApiKey() {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get(['groq_api_key'], (res) => {
+      resolve(res.groq_api_key || GROQ_API_KEY || '');
+    });
+  });
+}
+
+/**
+ * Fire-and-forget CEO Brief after a transcript is saved.
+ * Raw `text` stays primary; brief is additive (`ceoBrief*`).
+ */
+async function enqueueCeoBriefForItem(item) {
+  if (!item?.timestamp || !item?.text?.trim()) return;
+
+  const apiKey = await getGroqApiKey();
+  if (!apiKey) {
+    await updateHistoryItem(item.timestamp, {
+      ceoBriefStatus: 'error',
+      ceoBriefError: 'Add a Groq API key in Settings to generate CEO Briefs',
+    }).catch(() => {});
+    return;
+  }
+
+  await updateHistoryItem(item.timestamp, {
+    ceoBriefStatus: 'pending',
+    ceoBriefError: null,
+  }).catch(() => {});
+
+  try {
+    const ceoBrief = await generateCeoBrief({
+      apiKey,
+      text: item.text,
+      title: item.title,
+      url: item.url,
+      author: item.author,
+      source: item.source,
+      durationMin:
+        typeof item.durationSec === 'number' && item.durationSec > 0
+          ? item.durationSec / 60
+          : null,
+    });
+    await updateHistoryItem(item.timestamp, {
+      ceoBrief,
+      ceoBriefStatus: 'ready',
+      ceoBriefGeneratedAt: new Date().toISOString(),
+      ceoBriefError: null,
+    });
+  } catch (err) {
+    console.warn('[ceo-brief]', err.message);
+    await updateHistoryItem(item.timestamp, {
+      ceoBriefStatus: 'error',
+      ceoBriefError: err.message || 'Brief generation failed',
+    }).catch(() => {});
+  }
+}
+
+async function saveUrlToHistory({ text, url, service, metadata = {} }) {
+  const enriched = isValidYouTubeUrl(url)
+    ? await withYouTubeMetadata(url, metadata)
+    : metadata;
+  const item = await saveToHistory({
+    text,
+    sourceRef: url,
+    sourceType: 'url',
+    service,
+    metadata: { url, ...enriched },
+  });
+  enqueueCeoBriefForItem(item).catch((err) => console.warn('[ceo-brief]', err.message));
+  return item;
 }
 
 // Handle URL transcription (YouTube + other video pages via yt-dlp).
@@ -657,17 +765,22 @@ async function transcribeUrl(jobId, url) {
         progress: 10
       });
 
-      const captionText = await tryGetCaptionsFromTab(url);
-      if (captionText) {
+      const captionResult = await tryGetCaptionsFromTab(url);
+      if (captionResult?.text) {
         await updateJobProgress(jobId, {
           status: 'completed',
           message: '✅ Transcription complete!',
           progress: 100,
-          result: captionText,
+          result: captionResult.text,
           sourceType: 'url'
         });
         await showNotification(jobId, 'Transcription Complete', 'YouTube captions extracted successfully!');
-        saveToHistory(captionText, url, 'url', 'captions');
+        await saveUrlToHistory({
+          text: captionResult.text,
+          url,
+          service: 'captions',
+          metadata: captionResult.metadata,
+        });
         activeJobs.delete(jobId);
         stopKeepAlive();
         return;
@@ -687,17 +800,22 @@ async function transcribeUrl(jobId, url) {
         progress: 15
       });
 
-      const localTranscript = await tryLocalServerYouTubeTranscription(url);
-      if (localTranscript) {
+      const localResult = await tryLocalServerYouTubeTranscription(url);
+      if (localResult?.text) {
         await updateJobProgress(jobId, {
           status: 'completed',
           message: '✅ Transcription complete!',
           progress: 100,
-          result: localTranscript,
+          result: localResult.text,
           sourceType: 'url'
         });
         await showNotification(jobId, 'Transcription Complete', 'YouTube video transcribed via local server!');
-        saveToHistory(localTranscript, url, 'url', 'local');
+        await saveUrlToHistory({
+          text: localResult.text,
+          url,
+          service: 'local',
+          metadata: localResult.metadata,
+        });
         activeJobs.delete(jobId);
         stopKeepAlive();
         return;
@@ -753,7 +871,15 @@ async function transcribeUrl(jobId, url) {
 
     const notifyMsg = isYouTube ? 'YouTube video transcribed successfully!' : 'Page audio transcribed successfully!';
     await showNotification(jobId, 'Transcription Complete', notifyMsg);
-    saveToHistory(data.transcript, url, 'url', 'aether');
+    await saveUrlToHistory({
+      text: data.transcript,
+      url,
+      service: 'aether',
+      metadata: {
+        title: data.title || null,
+        author: data.channel || null,
+      },
+    });
     activeJobs.delete(jobId);
     stopKeepAlive();
   } catch (error) {
@@ -809,7 +935,15 @@ async function transcribeWithModalWhisper(jobId, fileData, modalUrl, modelSize) 
     });
 
     await showNotification(jobId, 'Transcription Complete', 'Whisper (Modal) transcription finished!');
-    saveToHistory(data.text, fileData.name, 'file', 'whisper-modal', modelSize);
+    const item = await saveToHistory({
+      text: data.text,
+      sourceRef: fileData.name,
+      sourceType: 'file',
+      service: 'whisper-modal',
+      model: modelSize,
+      metadata: { title: fileData.name },
+    });
+    enqueueCeoBriefForItem(item).catch((err) => console.warn('[ceo-brief]', err.message));
     activeJobs.delete(jobId);
     stopKeepAlive();
   } catch (error) {
@@ -826,88 +960,212 @@ async function transcribeWithModalWhisper(jobId, fileData, modalUrl, modelSize) 
   }
 }
 
-// Handle file transcription — calls Groq API directly if a key is available,
-// falls back to the Aether Modal backend (no key required).
+// Groq rejects uploads over ~25 MB. Large interviews are auto-compressed
+// (and chunked if needed) via the local server or Modal before transcription.
+const GROQ_MAX_BYTES = 24 * 1024 * 1024;
+const LARGE_FILE_TIMEOUT_MS = 15 * 60 * 1000;
+const SMALL_FILE_TIMEOUT_MS = 60 * 1000;
+
+function estimateFileBytes(fileData) {
+  if (typeof fileData?.size === 'number' && fileData.size > 0) return fileData.size;
+  // base64 length * 3/4 ≈ binary size
+  return Math.floor(((fileData?.data || '').length * 3) / 4);
+}
+
+function fileDataToBlob(fileData) {
+  const byteCharacters = atob(fileData.data);
+  const byteArray = new Uint8Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteArray[i] = byteCharacters.charCodeAt(i);
+  }
+  return new Blob([byteArray], { type: fileData.type || 'application/octet-stream' });
+}
+
+async function transcribeViaLocalServer(fileData, { onProgress } = {}) {
+  onProgress?.('Large file detected — compressing for transcription...');
+  const blob = fileDataToBlob(fileData);
+  const formData = new FormData();
+  formData.append('file', blob, fileData.name || 'audio.webm');
+  formData.append('model', 'whisper-large-v3-turbo');
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LARGE_FILE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${LOCAL_SERVER_URL}/api/transcribe-groq`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || `Local server error: ${response.status}`);
+    }
+    const data = await response.json();
+    const text = (data.text || data.transcript || '').trim();
+    if (!text) throw new Error('No transcription text returned from local server');
+    return {
+      text,
+      service: 'local',
+      compressed: !!data.compressed,
+      chunks: data.chunks || 1
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function transcribeViaModal(fileData, { onProgress, large } = {}) {
+  onProgress?.(
+    large
+      ? 'Large file detected — compressing for transcription...'
+      : '🚀 Transcribing audio...'
+  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    large ? LARGE_FILE_TIMEOUT_MS : SMALL_FILE_TIMEOUT_MS
+  );
+  try {
+    const response = await fetch(`${AETHER_API_URL}/transcribe/audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audio_b64: fileData.data,
+        filename: fileData.name || 'audio.webm'
+      }),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `Service error: ${response.status}`);
+    }
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Transcription failed');
+    const text = (data.transcript || '').trim();
+    if (!text) throw new Error('No transcription text returned');
+    return {
+      text,
+      service: 'aether',
+      compressed: !!data.compressed,
+      chunks: data.chunks || 1
+    };
+  } catch (fetchError) {
+    if (fetchError.name === 'AbortError') {
+      throw new Error('Transcription timed out. Try again, or run npm run server for local compression.');
+    }
+    throw fetchError;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function transcribeViaDirectGroq(fileData, groqApiKey, { onProgress } = {}) {
+  onProgress?.('🚀 Sending to Groq...');
+  const blob = fileDataToBlob(fileData);
+  const formData = new FormData();
+  formData.append('file', blob, fileData.name || 'audio.webm');
+  formData.append('model', 'whisper-large-v3-turbo');
+  formData.append('response_format', 'json');
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SMALL_FILE_TIMEOUT_MS);
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${groqApiKey}` },
+      body: formData,
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Groq API error: ${response.status}`);
+    }
+    const data = await response.json();
+    if (!data.text) throw new Error('No transcription text returned from Groq');
+    return { text: data.text, service: 'groq', compressed: false, chunks: 1 };
+  } catch (fetchErr) {
+    if (fetchErr.name === 'AbortError') throw new Error('Groq request timed out after 60s. Try again.');
+    throw fetchErr;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Handle file transcription — large files auto-compress via local server or Modal.
+// Small files use direct Groq when a key is available.
 async function transcribeWithGroq(jobId, fileData, groqApiKey) {
   try {
-    await updateJobProgress(jobId, {
-      status: 'processing',
-      message: '🚀 Transcribing audio...',
-      progress: 20
-    });
+    const bytes = estimateFileBytes(fileData);
+    const large = bytes > GROQ_MAX_BYTES;
+    const mb = (bytes / (1024 * 1024)).toFixed(1);
 
-    let transcript;
+    const onProgress = (message, progress = 30) =>
+      updateJobProgress(jobId, { status: 'processing', message, progress });
 
-    if (groqApiKey) {
-      // Direct Groq API path
-      const byteCharacters = atob(fileData.data);
-      const byteArray = new Uint8Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteArray[i] = byteCharacters.charCodeAt(i);
-      }
-      const blob = new Blob([byteArray], { type: fileData.type });
-      const formData = new FormData();
-      formData.append('file', blob, fileData.name || 'audio.webm');
-      formData.append('model', 'whisper-large-v3-turbo');
-      formData.append('response_format', 'json');
+    await onProgress(
+      large
+        ? `📦 Large file (${mb} MB) — compressing, then transcribing...`
+        : '🚀 Transcribing audio...',
+      20
+    );
 
-      await updateJobProgress(jobId, { status: 'processing', message: '🚀 Sending to Groq...', progress: 40 });
+    let result;
+    let lastError;
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
-      let response;
+    if (large) {
+      // Prefer local ffmpeg (residential path), then Modal auto-compress.
       try {
-        response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${groqApiKey}` },
-          body: formData,
-          signal: controller.signal
-        });
-      } catch (fetchErr) {
-        if (fetchErr.name === 'AbortError') throw new Error('Groq request timed out after 60s. Try again.');
-        throw fetchErr;
-      } finally {
-        clearTimeout(timeoutId);
+        result = await transcribeViaLocalServer(fileData, { onProgress });
+      } catch (err) {
+        lastError = err;
+        console.warn('[transcribe] local compress path failed:', err.message);
       }
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.error?.message || `Groq API error: ${response.status}`);
+      if (!result) {
+        try {
+          result = await transcribeViaModal(fileData, { onProgress, large: true });
+        } catch (err) {
+          lastError = err;
+        }
       }
-      const data = await response.json();
-      if (!data.text) throw new Error('No transcription text returned from Groq');
-      transcript = data.text;
+      if (!result) {
+        throw lastError || new Error('Could not transcribe large file');
+      }
+    } else if (groqApiKey) {
+      try {
+        result = await transcribeViaDirectGroq(fileData, groqApiKey, { onProgress });
+      } catch (err) {
+        // Fall back to Modal if direct Groq fails (size edge cases, rate limits).
+        console.warn('[transcribe] direct Groq failed, trying Modal:', err.message);
+        result = await transcribeViaModal(fileData, { onProgress, large: false });
+      }
     } else {
-      // Aether Modal backend fallback (no key needed)
-      let response;
-      try {
-        response = await fetch(`${AETHER_API_URL}/transcribe/audio`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audio_b64: fileData.data, filename: fileData.name || 'audio.webm' })
-        });
-      } catch (fetchError) {
-        throw new Error('Cannot reach transcription service. Check your connection and try again.');
-      }
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || `Service error: ${response.status}`);
-      }
-      const data = await response.json();
-      if (!data.success) throw new Error(data.error || 'Transcription failed');
-      transcript = data.transcript;
+      result = await transcribeViaModal(fileData, { onProgress, large: false });
     }
+
+    const transcript = result.text;
+    const doneMsg = result.compressed
+      ? `✅ Transcription complete (auto-compressed${result.chunks > 1 ? `, ${result.chunks} chunks` : ''})!`
+      : '✅ Transcription complete!';
 
     await updateJobProgress(jobId, {
       status: 'completed',
-      message: '✅ Transcription complete!',
+      message: doneMsg,
       progress: 100,
       result: transcript,
-      sourceType: 'file'
+      sourceType: 'file',
+      compressed: result.compressed,
+      chunks: result.chunks
     });
 
     await showNotification(jobId, 'Transcription Complete', 'Audio transcribed successfully!');
-    saveToHistory(transcript, fileData.name, 'file', groqApiKey ? 'groq' : 'aether');
+    const item = await saveToHistory({
+      text: transcript,
+      sourceRef: fileData.name,
+      sourceType: 'file',
+      service: result.service,
+      metadata: { title: fileData.name },
+    });
+    enqueueCeoBriefForItem(item).catch((err) => console.warn('[ceo-brief]', err.message));
     activeJobs.delete(jobId);
     stopKeepAlive();
   } catch (error) {
@@ -917,7 +1175,14 @@ async function transcribeWithGroq(jobId, fileData, groqApiKey) {
       progress: 0,
       error: error.message
     });
-    await logError({ jobId, source: 'file', sourceRef: fileData?.name, errorMessage: error.message, stage: 'processing', service: groqApiKey ? 'groq' : 'aether' });
+    await logError({
+      jobId,
+      source: 'file',
+      sourceRef: fileData?.name,
+      errorMessage: error.message,
+      stage: 'processing',
+      service: groqApiKey ? 'groq' : 'aether'
+    });
     await showNotification(jobId, 'Transcription Failed', error.message);
     activeJobs.delete(jobId);
     stopKeepAlive();
@@ -991,7 +1256,15 @@ async function transcribeWithWhisper(jobId, file, fileName, model) {
       'basic'
     );
 
-    saveToHistory(data.text, fileName, 'file', 'whisper-local', model);
+    const item = await saveToHistory({
+      text: data.text,
+      sourceRef: fileName,
+      sourceType: 'file',
+      service: 'whisper-local',
+      model,
+      metadata: { title: fileName },
+    });
+    enqueueCeoBriefForItem(item).catch((err) => console.warn('[ceo-brief]', err.message));
     activeJobs.delete(jobId);
     stopKeepAlive();
   } catch (error) {
@@ -1008,32 +1281,6 @@ async function transcribeWithWhisper(jobId, file, fileName, model) {
     activeJobs.delete(jobId);
     stopKeepAlive();
   }
-}
-
-// Save to history
-function saveToHistory(text, source, type = 'url', service = 'groq', model = null) {
-  const timestamp = new Date().toISOString();
-  chrome.storage.local.get(['history'], (res) => {
-    const history = res.history || [];
-    const historyItem = {
-      text,
-      timestamp,
-      source: service
-    };
-
-    if (model) {
-      historyItem.model = model;
-    }
-
-    if (type === 'url') {
-      historyItem.url = source;
-    } else {
-      historyItem.fileName = source;
-    }
-
-    history.unshift(historyItem);
-    chrome.storage.local.set({ history });
-  });
 }
 
 // Export formatTime for use in other modules if needed
@@ -1326,6 +1573,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       sendResponse({ jobs });
     });
+    return true;
+  }
+
+  if (message.type === 'generate_ceo_brief') {
+    (async () => {
+      try {
+        const item = await getHistoryItem(message.timestamp);
+        if (!item) {
+          sendResponse({ error: 'History item not found' });
+          return;
+        }
+        await enqueueCeoBriefForItem(item);
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ error: err.message || 'Failed to generate CEO Brief' });
+      }
+    })();
     return true;
   }
 });

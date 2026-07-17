@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "start": "node server.js",
-    "server": "node server.js"
+    "server": "node server.js",
+    "aether": "python scripts/aether.py"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -6,6 +6,7 @@ import GlassCard from '@/components/layout/GlassCard';
 import Button from '@/components/shared/Button';
 import CopyButton from '@/components/shared/CopyButton';
 import StatusMessage from '@/components/shared/StatusMessage';
+import CeoBriefStatusNote from '@/components/shared/CeoBriefStatusNote';
 import AudioVisualizer from '@/components/features/AudioVisualizer';
 
 function formatElapsed(seconds) {
@@ -151,6 +152,7 @@ export default function RecordTab({ isRecording: parentIsRecording, setIsRecordi
                 <div className="bg-white/5 rounded-lg p-3 max-h-48 overflow-y-auto">
                   <p className="text-sm text-luna-silver whitespace-pre-wrap">{result}</p>
                 </div>
+                <CeoBriefStatusNote transcript={result} />
                 <CopyButton text={result} className="w-full">
                   Copy Transcript
                 </CopyButton>

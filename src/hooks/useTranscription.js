@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { isValidUrl } from '@utils/validators';
-import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats } from '@utils/fileValidators';
+import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats, MAX_UPLOAD_MB } from '@utils/fileValidators';
 
 export function useTranscription() {
   const [status, setStatus] = useState('');
@@ -158,8 +158,8 @@ export function useTranscription() {
       return;
     }
 
-    if (!isValidFileSize(file, 100)) {
-      setStatus(`❌ File size exceeds 100 MB limit.\nCurrent size: ${getFileSizeInMB(file)} MB`);
+    if (!isValidFileSize(file, MAX_UPLOAD_MB)) {
+      setStatus(`❌ File size exceeds ${MAX_UPLOAD_MB} MB upload limit.\nCurrent size: ${getFileSizeInMB(file)} MB\n\nLarge files under this limit are auto-compressed before transcription.`);
       return;
     }
 
