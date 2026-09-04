@@ -5,9 +5,11 @@ node_modules/
 .env
 .env.*
 !.env.example
+youtube_cookies.txt
 
 # Build output (rebuild with `npm run build`; may embed VITE_* keys if .env present)
 dist/
+dist-opera/
 
 # Local server audio cache
 audio/
@@ -52,4 +54,5 @@ backup_vanilla/
 
 # Optional local tooling (not needed for extension runtime)
 .claude/settings.local.json
-.cursor/
+.cursor/*
+!.cursor/environment.json

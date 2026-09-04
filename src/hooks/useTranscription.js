@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { isValidUrl } from '@utils/validators';
-import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats } from '@utils/fileValidators';
+import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats, MAX_UPLOAD_MB } from '@utils/fileValidators';
+import { putUploadFile, deleteUploadFile } from '@utils/fileTransferIdb';
 
 export function useTranscription() {
   const [status, setStatus] = useState('');
@@ -158,8 +159,8 @@ export function useTranscription() {
       return;
     }
 
-    if (!isValidFileSize(file, 100)) {
-      setStatus(`❌ File size exceeds 100 MB limit.\nCurrent size: ${getFileSizeInMB(file)} MB`);
+    if (!isValidFileSize(file, MAX_UPLOAD_MB)) {
+      setStatus(`❌ File size exceeds ${MAX_UPLOAD_MB} MB upload limit.\nCurrent size: ${getFileSizeInMB(file)} MB\n\nLarge files under this limit are auto-compressed before transcription.`);
       return;
     }
 
@@ -169,27 +170,24 @@ export function useTranscription() {
     setStatus('🚀 Starting transcription...');
     setProgress(0);
 
+    let fileId = null;
     try {
-      // Convert file to base64 for transfer to background service
-      const fileData = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve({
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            data: reader.result.split(',')[1] // Remove data:type;base64, prefix
-          });
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      // Chrome sendMessage is capped at 64 MiB. Base64 of a large local-Whisper
+      // file exceeds that, so stash the blob in IndexedDB and send only a key.
+      fileId = await putUploadFile(file);
 
       const response = await chrome.runtime.sendMessage({
         type: 'start_transcription',
         source: 'file',
-        fileData: fileData
+        fileId,
+        fileName: file.name,
+        fileType: file.type,
+        fileSize: file.size
       });
+
+      if (response?.error) {
+        throw new Error(response.error);
+      }
 
       if (response && response.jobId) {
         currentJobIdRef.current = response.jobId;
@@ -197,6 +195,9 @@ export function useTranscription() {
         throw new Error('Failed to start transcription job');
       }
     } catch (err) {
+      if (fileId) {
+        deleteUploadFile(fileId).catch(() => {});
+      }
       setStatus('❌ Error: ' + err.message);
       setError(err);
       setIsLoading(false);

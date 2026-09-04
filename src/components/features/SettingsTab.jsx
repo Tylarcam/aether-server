@@ -1,14 +1,21 @@
-import { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, ExternalLink, Trash2, Sun, Moon, Monitor, Mic, MicOff, Radio } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Save, Eye, EyeOff, ExternalLink, Trash2, Sun, Moon, Monitor, Mic, MicOff, Radio, Cookie, Download, RefreshCw, Copy } from 'lucide-react';
 import { useStorage } from '@/hooks/useStorage';
 import { useTheme } from '@/hooks/useTheme';
 import { useAudioDevices } from '@/hooks/useAudioDevices';
 import { RECORDING_FORMAT_OPTIONS, DEFAULT_RECORDING_OUTPUT_FORMAT } from '@/utils/recordingFormats';
+import {
+  getYoutubeCookies,
+  summarizeYoutubeCookies,
+  formatCookieExpiry,
+  maskCookieValue,
+  downloadNetscapeCookies,
+  toNetscapeCookieFile,
+} from '@/utils/youtubeCookies';
 import GlassCard from '@/components/layout/GlassCard';
 import Button from '@/components/shared/Button';
 import Input from '@/components/shared/Input';
 import Select from '@/components/shared/Select';
-import StatusMessage from '@/components/shared/StatusMessage';
 
 // Key baked in at build time from .env — available as a read-only fallback
 const ENV_GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || '';
@@ -42,6 +49,66 @@ export default function SettingsTab() {
     stopMicTest
   } = useAudioDevices();
 
+  const [ytCookies, setYtCookies] = useState([]);
+  const [ytCookieSummary, setYtCookieSummary] = useState(null);
+  const [ytCookiesLoading, setYtCookiesLoading] = useState(false);
+  const [ytCookiesError, setYtCookiesError] = useState('');
+  const [showCookieValues, setShowCookieValues] = useState(false);
+  const [cookieActionStatus, setCookieActionStatus] = useState('');
+
+  const loadYoutubeCookies = useCallback(async () => {
+    setYtCookiesLoading(true);
+    setYtCookiesError('');
+    try {
+      const cookies = await getYoutubeCookies();
+      setYtCookies(cookies);
+      setYtCookieSummary(summarizeYoutubeCookies(cookies));
+    } catch (err) {
+      setYtCookies([]);
+      setYtCookieSummary(null);
+      setYtCookiesError(err.message || 'Failed to read YouTube cookies');
+    } finally {
+      setYtCookiesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadYoutubeCookies();
+  }, [loadYoutubeCookies]);
+
+  const handleDownloadCookies = async () => {
+    try {
+      const cookies = ytCookies.length ? ytCookies : await getYoutubeCookies();
+      if (!cookies.length) {
+        setCookieActionStatus('No YouTube cookies found — sign in to YouTube in this browser, then refresh.');
+        setTimeout(() => setCookieActionStatus(''), 4000);
+        return;
+      }
+      await downloadNetscapeCookies(cookies, 'youtube_cookies.txt');
+      setCookieActionStatus('Downloaded youtube_cookies.txt — place it in the Aether project root for local yt-dlp.');
+      setTimeout(() => setCookieActionStatus(''), 5000);
+    } catch (err) {
+      setCookieActionStatus(`Download failed: ${err.message}`);
+      setTimeout(() => setCookieActionStatus(''), 4000);
+    }
+  };
+
+  const handleCopyCookiesTxt = async () => {
+    try {
+      const cookies = ytCookies.length ? ytCookies : await getYoutubeCookies();
+      if (!cookies.length) {
+        setCookieActionStatus('No YouTube cookies to copy.');
+        setTimeout(() => setCookieActionStatus(''), 3000);
+        return;
+      }
+      await navigator.clipboard.writeText(toNetscapeCookieFile(cookies));
+      setCookieActionStatus('Copied Netscape cookies.txt to clipboard.');
+      setTimeout(() => setCookieActionStatus(''), 3000);
+    } catch (err) {
+      setCookieActionStatus(`Copy failed: ${err.message}`);
+      setTimeout(() => setCookieActionStatus(''), 4000);
+    }
+  };
 
   const handleSaveGroqKey = () => {
     if (tempGroqKey.trim()) {
@@ -507,6 +574,149 @@ export default function SettingsTab() {
               {theme === 'system' ? 'System (follows OS preference)' : theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
             </p>
           </div>
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-lg font-semibold text-luna-white flex items-center gap-2">
+              <Cookie className="w-5 h-5 text-luna-accent-primary" />
+              YouTube Cookies
+            </h3>
+            <Button
+              onClick={loadYoutubeCookies}
+              disabled={ytCookiesLoading}
+              variant="secondary"
+              className="!px-3 !py-2"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <RefreshCw className={`w-4 h-4 ${ytCookiesLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </div>
+            </Button>
+          </div>
+          <p className="text-sm text-luna-silver">
+            Export your browser&apos;s YouTube session as Netscape <code className="text-luna-white">youtube_cookies.txt</code> for local yt-dlp
+            (<span className="text-luna-silver/80"> (project root next to server.js)</span>.
+          </p>
+
+          {ytCookiesError && (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+              <p className="text-sm text-red-400">{ytCookiesError}</p>
+              <p className="text-xs text-luna-silver mt-1">
+                After adding the cookies permission, reload the extension on chrome://extensions.
+              </p>
+            </div>
+          )}
+
+          {ytCookieSummary && (
+            <div className="bg-luna-accent-primary/10 border border-luna-accent-primary/20 rounded-lg p-3 space-y-2">
+              <p className="text-xs text-luna-white">
+                <strong>Status:</strong>{' '}
+                <span className={ytCookieSummary.looksSignedIn ? 'text-green-400' : 'text-yellow-400'}>
+                  {ytCookieSummary.looksSignedIn
+                    ? 'Signed-in session cookies detected'
+                    : 'Weak / missing auth cookies — sign in to YouTube in Chrome'}
+                </span>
+              </p>
+              <p className="text-xs text-luna-silver">
+                Total: <span className="text-luna-accent-primary">{ytCookieSummary.total}</span>
+                {' · '}
+                Session: <span className="text-luna-accent-primary">{ytCookieSummary.sessionCount}</span>
+                {ytCookieSummary.soonestExpiry != null && (
+                  <>
+                    {' · '}
+                    Earliest expiry:{' '}
+                    <span className="text-luna-accent-primary">
+                      {new Date(ytCookieSummary.soonestExpiry * 1000).toLocaleString()}
+                    </span>
+                  </>
+                )}
+              </p>
+              <p className="text-xs text-luna-silver">
+                Auth present:{' '}
+                <span className="text-luna-white">
+                  {ytCookieSummary.presentAuth.length
+                    ? ytCookieSummary.presentAuth.join(', ')
+                    : 'none'}
+                </span>
+              </p>
+              {ytCookieSummary.missingAuth.length > 0 && (
+                <p className="text-xs text-luna-silver/80">
+                  Missing: {ytCookieSummary.missingAuth.join(', ')}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <Button
+              onClick={handleDownloadCookies}
+              disabled={ytCookiesLoading || !ytCookies.length}
+              variant="primary"
+              className="flex-1"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <Download className="w-5 h-5" />
+                Download .txt
+              </div>
+            </Button>
+            <Button
+              onClick={handleCopyCookiesTxt}
+              disabled={ytCookiesLoading || !ytCookies.length}
+              variant="secondary"
+              className="flex-1"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <Copy className="w-5 h-5" />
+                Copy .txt
+              </div>
+            </Button>
+          </div>
+
+          {cookieActionStatus && (
+            <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
+              <p className="text-sm text-green-400 text-center">{cookieActionStatus}</p>
+            </div>
+          )}
+
+          {ytCookies.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-luna-white">Cookie details</p>
+                <button
+                  type="button"
+                  onClick={() => setShowCookieValues((v) => !v)}
+                  className="text-luna-silver hover:text-luna-white transition-colors flex items-center gap-1 text-xs"
+                >
+                  {showCookieValues ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showCookieValues ? 'Hide values' : 'Show values'}
+                </button>
+              </div>
+              <div className="max-h-56 overflow-y-auto rounded-lg border border-white/10 divide-y divide-white/5">
+                {ytCookies.map((cookie) => (
+                  <div
+                    key={`${cookie.domain}|${cookie.path}|${cookie.name}`}
+                    className="px-3 py-2 text-xs space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-luna-white truncate">{cookie.name}</span>
+                      <span className="text-luna-silver shrink-0">{formatCookieExpiry(cookie)}</span>
+                    </div>
+                    <p className="text-luna-silver/80 truncate">
+                      {cookie.domain}{cookie.path}
+                      {cookie.secure ? ' · Secure' : ''}
+                      {cookie.httpOnly ? ' · HttpOnly' : ''}
+                    </p>
+                    <p className="font-mono text-luna-silver break-all">
+                      {maskCookieValue(cookie.value, showCookieValues)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </GlassCard>
 

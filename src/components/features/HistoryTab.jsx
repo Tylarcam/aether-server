@@ -1,16 +1,24 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Download, Trash2, Clock, Search, X, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Download, Trash2, Clock, Search, X, AlertTriangle, ChevronDown, ChevronUp, Link2, User, FileText, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { filterHistory, debounce } from '@/utils/searchUtils';
+import { getHistoryDisplayTitle, historyDownloadBasename } from '@/utils/history';
+import { fetchYouTubeOEmbed } from '@/utils/youtubeMetadata';
 import GlassCard from '@/components/layout/GlassCard';
 import Button from '@/components/shared/Button';
 import CopyButton from '@/components/shared/CopyButton';
 import Input from '@/components/shared/Input';
+import CeoBriefMarkdown from '@/components/shared/CeoBriefMarkdown';
 
 const SERVICE_LABELS = {
   groq: '🚀 Groq',
   'whisper-local': '🤖 Whisper (local)',
   'whisper-modal': '☁️ Whisper (Modal)',
+  captions: '📝 Captions',
+  local: '🏠 Local server',
+  aether: '☁️ Aether',
+  huggingface: '🤗 Hugging Face',
+  whisper: '🤖 Whisper',
 };
 
 const STAGE_LABELS = {
@@ -27,6 +35,7 @@ export default function HistoryTab() {
   const [errorLog, setErrorLog] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [showErrors, setShowErrors] = useState(false);
+  const [expandedBriefs, setExpandedBriefs] = useState(() => new Set());
 
   useEffect(() => {
     loadHistory();
@@ -42,9 +51,48 @@ export default function HistoryTab() {
     return () => chrome.storage.onChanged.removeListener(listener);
   }, []);
 
+  const toggleBrief = (timestamp) => {
+    setExpandedBriefs((prev) => {
+      const next = new Set(prev);
+      if (next.has(timestamp)) next.delete(timestamp);
+      else next.add(timestamp);
+      return next;
+    });
+  };
+
+  const requestCeoBrief = (timestamp) => {
+    chrome.runtime.sendMessage(
+      { type: 'generate_ceo_brief', timestamp },
+      () => {
+        void chrome.runtime.lastError;
+      }
+    );
+  };
+
+  const backfillYouTubeTitles = async (items) => {
+    let changed = false;
+    const updated = await Promise.all(items.map(async (item) => {
+      if (item.title || !item.url) return item;
+      const meta = await fetchYouTubeOEmbed(item.url);
+      if (!meta?.title) return item;
+      changed = true;
+      return {
+        ...item,
+        title: meta.title,
+        ...(meta.author && !item.author ? { author: meta.author } : {}),
+      };
+    }));
+    if (changed) {
+      chrome.storage.local.set({ history: updated });
+    }
+    return updated;
+  };
+
   const loadHistory = () => {
-    chrome.storage.local.get(['history'], (result) => {
-      setHistory(result.history || []);
+    chrome.storage.local.get(['history'], async (result) => {
+      const items = result.history || [];
+      const enriched = await backfillYouTubeTitles(items);
+      setHistory(enriched);
     });
   };
 
@@ -65,12 +113,23 @@ export default function HistoryTab() {
     setErrorLog(updated);
   };
 
-  const downloadTranscript = (text, timestamp) => {
-    const blob = new Blob([text], { type: 'text/plain' });
+  const downloadTranscript = (item) => {
+    const header = [
+      item.title ? `Title: ${item.title}` : null,
+      item.author ? `Author/Publisher: ${item.author}` : null,
+      item.url ? `URL: ${item.url}` : null,
+      item.fileName && !item.url ? `File: ${item.fileName}` : null,
+      `Transcribed: ${formatDate(item.timestamp)}`,
+      '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+
+    const blob = new Blob([header + item.text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `transcript-${timestamp}.txt`;
+    a.download = `${historyDownloadBasename(item)}-${item.timestamp.slice(0, 10)}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -123,7 +182,7 @@ export default function HistoryTab() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search transcriptions, files, URLs..."
+              placeholder="Search by title, author, URL, transcript, or brief..."
               className="pl-10 pr-10"
             />
             {searchQuery && (
@@ -187,27 +246,155 @@ export default function HistoryTab() {
                 <GlassCard>
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-4">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 text-sm text-luna-silver mb-2">
-                          <Clock className="w-4 h-4" />
+                      <div className="flex-1 min-w-0 space-y-2">
+                        <h3 className="text-base font-semibold text-luna-white leading-snug">
+                          {getHistoryDisplayTitle(item)}
+                        </h3>
+
+                        {item.author && (
+                          <p className="flex items-center gap-1.5 text-sm text-luna-silver">
+                            <User className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{item.author}</span>
+                          </p>
+                        )}
+
+                        {item.url && (
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1.5 text-xs text-luna-accent-primary hover:underline truncate"
+                            title={item.url}
+                          >
+                            <Link2 className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{item.url}</span>
+                          </a>
+                        )}
+
+                        {!item.url && item.fileName && (
+                          <p className="text-xs text-luna-silver/70 truncate">
+                            File: {item.fileName}
+                          </p>
+                        )}
+
+                        {/* CEO Brief — secondary, collapsed under source link */}
+                        <div className="rounded-lg border border-white/5 bg-black/10">
+                          <button
+                            type="button"
+                            onClick={() => toggleBrief(item.timestamp)}
+                            className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left"
+                          >
+                            <span className="flex items-center gap-1.5 text-xs font-medium text-luna-silver">
+                              <FileText className="w-3.5 h-3.5 shrink-0" />
+                              CEO Brief
+                              {item.ceoBriefStatus === 'pending' && (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-luna-accent-primary" />
+                              )}
+                              {item.ceoBriefStatus === 'ready' && (
+                                <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[10px]">
+                                  Ready
+                                </span>
+                              )}
+                              {item.ceoBriefStatus === 'error' && (
+                                <span className="px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 text-[10px]">
+                                  Error
+                                </span>
+                              )}
+                            </span>
+                            {expandedBriefs.has(item.timestamp) ? (
+                              <ChevronUp className="w-3.5 h-3.5 text-luna-silver shrink-0" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5 text-luna-silver shrink-0" />
+                            )}
+                          </button>
+
+                          <AnimatePresence initial={false}>
+                            {expandedBriefs.has(item.timestamp) && (
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.2 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="px-3 pb-3 space-y-2 border-t border-white/5 pt-2">
+                                  {item.ceoBriefStatus === 'pending' && (
+                                    <p className="text-xs text-luna-silver flex items-center gap-2">
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      Generating CEO Brief from transcript…
+                                    </p>
+                                  )}
+
+                                  {item.ceoBriefStatus === 'error' && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-red-300">
+                                        {item.ceoBriefError || 'Brief generation failed'}
+                                      </p>
+                                      <Button
+                                        onClick={() => requestCeoBrief(item.timestamp)}
+                                        variant="secondary"
+                                        className="!px-3 !py-1 text-xs"
+                                      >
+                                        Retry
+                                      </Button>
+                                    </div>
+                                  )}
+
+                                  {item.ceoBrief && (
+                                    <div className="space-y-2">
+                                      <div className="bg-black/30 rounded-lg p-3 max-h-64 overflow-y-auto">
+                                        <CeoBriefMarkdown markdown={item.ceoBrief} />
+                                      </div>
+                                      <div className="flex justify-end gap-2">
+                                        <CopyButton text={item.ceoBrief} className="!px-3 !py-1 text-xs">
+                                          Copy brief
+                                        </CopyButton>
+                                        <Button
+                                          onClick={() => requestCeoBrief(item.timestamp)}
+                                          variant="secondary"
+                                          className="!px-3 !py-1 text-xs"
+                                        >
+                                          Regenerate
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {!item.ceoBrief && item.ceoBriefStatus !== 'pending' && item.ceoBriefStatus !== 'error' && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-luna-silver">
+                                        No brief yet. Generate from the raw transcript (transcript stays primary).
+                                      </p>
+                                      <Button
+                                        onClick={() => requestCeoBrief(item.timestamp)}
+                                        variant="secondary"
+                                        className="!px-3 !py-1 text-xs"
+                                      >
+                                        Generate CEO Brief
+                                      </Button>
+                                    </div>
+                                  )}
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        <div className="flex items-center gap-2 text-sm text-luna-silver flex-wrap">
+                          <Clock className="w-4 h-4 shrink-0" />
                           {formatDate(item.timestamp)}
 
                           {item.source && (
                             <span className={`px-2 py-0.5 rounded-full text-xs ${
-                              item.source === 'whisper'
+                              item.source === 'whisper' || item.source === 'whisper-local'
                                 ? 'bg-green-500/20 text-green-400'
                                 : 'bg-blue-500/20 text-blue-400'
                             }`}>
                               {SERVICE_LABELS[item.source] || item.source}
                             </span>
                           )}
-
-                          {item.fileName && (
-                            <span className="text-xs text-luna-silver/70">
-                              ({item.fileName})
-                            </span>
-                          )}
                         </div>
+
                         <div className="bg-black/20 rounded-lg p-4 max-h-40 overflow-y-auto">
                           <p className="text-luna-white text-sm line-clamp-6">
                             {item.text}
@@ -221,7 +408,7 @@ export default function HistoryTab() {
                         Copy
                       </CopyButton>
                       <Button
-                        onClick={() => downloadTranscript(item.text, item.timestamp)}
+                        onClick={() => downloadTranscript(item)}
                         variant="secondary"
                         className="!px-4 !py-2"
                       >

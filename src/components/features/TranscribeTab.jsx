@@ -11,6 +11,7 @@ import CopyButton from '@/components/shared/CopyButton';
 import Input from '@/components/shared/Input';
 import Select from '@/components/shared/Select';
 import StatusMessage from '@/components/shared/StatusMessage';
+import CeoBriefStatusNote from '@/components/shared/CeoBriefStatusNote';
 
 export default function TranscribeTab() {
   const [mode, setMode] = useState('url');
@@ -451,6 +452,7 @@ export default function TranscribeTab() {
             <div className="bg-black/20 rounded-lg p-4 max-h-96 overflow-y-auto">
               <p className="text-luna-white whitespace-pre-wrap">{result}</p>
             </div>
+            <CeoBriefStatusNote transcript={result} />
           </div>
         </GlassCard>
       )}

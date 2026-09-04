@@ -1,13 +1,23 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { crx } from '@crxjs/vite-plugin';
-import manifest from './src/manifest.json';
+import chromeManifest from './src/manifest.json';
 import path from 'path';
 
-export default defineConfig({
+function manifestForBrowser(mode) {
+  if (mode !== 'opera') return chromeManifest;
+  // Strip the unknown permission so GX can load. Keep side_panel so CRXJS
+  // still treats index.html as an entry (Opera ignores the unknown key).
+  return {
+    ...chromeManifest,
+    permissions: chromeManifest.permissions.filter((name) => name !== 'sidePanel')
+  };
+}
+
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
-    crx({ manifest })
+    crx({ manifest: manifestForBrowser(mode) })
   ],
   resolve: {
     alias: {
@@ -19,8 +29,12 @@ export default defineConfig({
     }
   },
   build: {
-    outDir: 'dist',
-    emptyOutDir: true
+    outDir: mode === 'opera' ? 'dist-opera' : 'dist',
+    emptyOutDir: true,
+    // Shared chunks (e.g. youtubeMetadata used by both the side panel and
+    // the service worker) get Vite modulepreload tags that Chrome rejects as
+    // "cross-world extension resource mismatch". Disable preloads for MV3.
+    modulePreload: false
   },
   server: {
     port: 5173,
@@ -29,4 +43,4 @@ export default defineConfig({
       port: 5173
     }
   }
-});
+}));

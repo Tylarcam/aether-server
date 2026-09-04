@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { isValidWhisperFile, isValidFileSize, getFileSizeInMB, getWhisperSupportedFormats } from '@utils/fileValidators';
+import { saveToHistory } from '@utils/history';
 
 export function useWhisperTranscription(apiKey) {
   const [status, setStatus] = useState('');
@@ -87,27 +88,19 @@ export function useWhisperTranscription(apiKey) {
       setIsLoading(false);
 
       // Save to history with metadata
-      saveToHistory(data.text, file.name);
+      saveToHistory({
+        text: data.text,
+        sourceRef: file.name,
+        sourceType: 'file',
+        service: 'whisper',
+        metadata: { title: file.name },
+      });
 
     } catch (err) {
       setStatus('❌ Error: ' + err.message);
       setError(err);
       setIsLoading(false);
     }
-  };
-
-  const saveToHistory = (text, fileName) => {
-    const timestamp = new Date().toISOString();
-    chrome.storage.local.get(['history'], (res) => {
-      const history = res.history || [];
-      history.unshift({
-        text,
-        timestamp,
-        source: 'whisper',
-        fileName: fileName
-      });
-      chrome.storage.local.set({ history });
-    });
   };
 
   return { transcribeFile, status, result, error, isLoading };
