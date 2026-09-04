@@ -11,7 +11,8 @@
     "downloads",
     "notifications",
     "offscreen",
-    "sidePanel"
+    "sidePanel",
+    "cookies"
   ],
   "side_panel": {
     "default_path": "index.html"

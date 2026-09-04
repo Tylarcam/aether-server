@@ -14,13 +14,68 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('Aether Audio Transcriber Installed');
 });
 
-// Open the side panel when the user clicks the toolbar icon.
-// Using action.onClicked (instead of openPanelOnActionClick) is required so that Chrome
-// fires the onClicked event, which grants activeTab permission for that tab.
+// Open the UI when the user clicks the toolbar icon.
+// Using action.onClicked (instead of openPanelOnActionClick / default_popup) is
+// required so Chrome fires onClicked, which grants activeTab for that tab.
 // Without activeTab, chrome.tabCapture.getMediaStreamId always fails with
 // "Extension has not been invoked for the current page".
+// Opera GX does not implement chrome.sidePanel — feature-detect and fall back
+// to a focused popup window of the same index.html.
+const PANEL_URL = chrome.runtime.getURL('index.html');
+const FALLBACK_PANEL_WIDTH = 420;
+const FALLBACK_PANEL_HEIGHT = 720;
+let fallbackPanelWindowId = null;
+
+function rememberCaptureTargetTab(tabId) {
+  if (tabId == null) return;
+  // Fire-and-forget: never await before sidePanel.open / windows.create —
+  // those must stay in the same user-gesture turn as onClicked.
+  chrome.storage.session.set({ captureTargetTabId: tabId }).catch(() => {});
+  chrome.runtime.sendMessage({ type: 'captureTargetUpdated', tabId }).catch(() => {});
+}
+
+function panelUrlForTab(tabId) {
+  if (tabId == null) return PANEL_URL;
+  const url = new URL(PANEL_URL);
+  url.searchParams.set('captureTabId', String(tabId));
+  return url.href;
+}
+
+async function openFallbackPanelWindow(tabId) {
+  if (fallbackPanelWindowId != null) {
+    try {
+      await chrome.windows.update(fallbackPanelWindowId, { focused: true });
+      return;
+    } catch {
+      fallbackPanelWindowId = null;
+    }
+  }
+  const win = await chrome.windows.create({
+    url: panelUrlForTab(tabId),
+    type: 'popup',
+    focused: true,
+    width: FALLBACK_PANEL_WIDTH,
+    height: FALLBACK_PANEL_HEIGHT
+  });
+  fallbackPanelWindowId = win?.id ?? null;
+}
+
+if (chrome.windows?.onRemoved) {
+  chrome.windows.onRemoved.addListener((windowId) => {
+    if (windowId === fallbackPanelWindowId) fallbackPanelWindowId = null;
+  });
+}
+
 chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+  // activeTab is granted for this tab on icon click. Persist it so Record can
+  // call getMediaStreamId synchronously (no tabs.query) with the invoked tab.
+  rememberCaptureTargetTab(tab?.id);
+
+  if (typeof chrome.sidePanel?.open === 'function') {
+    chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+    return;
+  }
+  openFallbackPanelWindow(tab?.id).catch(() => {});
 });
 
 // ---- Recording State ----
@@ -150,8 +205,18 @@ async function getRecordingFromIDB(filename) {
     tx.oncomplete = () => db.close();
   });
   const normalized = normalizeRecordingRecord(record);
-  if (!normalized) throw new Error('Recording blob not found in IDB');
+  if (!normalized) throw new Error('Audio blob not found in IndexedDB');
   return normalized;
+}
+
+async function deleteBlobFromIDB(filename) {
+  const db = await openRecordingsIDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('blobs', 'readwrite');
+    tx.objectStore('blobs').delete(filename);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
 }
 
 async function getBlobFromIDB(filename) {
@@ -912,7 +977,7 @@ async function transcribeWithModalWhisper(jobId, fileData, modalUrl, modelSize) 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        audio_base64: fileData.data,
+        audio_base64: await ensureBase64(fileData),
         model: modelSize || 'base',
         filename: fileData.name || 'audio.webm',
       })
@@ -973,12 +1038,26 @@ function estimateFileBytes(fileData) {
 }
 
 function fileDataToBlob(fileData) {
+  if (fileData?.blob instanceof Blob) {
+    return fileData.blob;
+  }
+  if (!fileData?.data) {
+    throw new Error('File data not provided');
+  }
   const byteCharacters = atob(fileData.data);
   const byteArray = new Uint8Array(byteCharacters.length);
   for (let i = 0; i < byteCharacters.length; i++) {
     byteArray[i] = byteCharacters.charCodeAt(i);
   }
   return new Blob([byteArray], { type: fileData.type || 'application/octet-stream' });
+}
+
+async function ensureBase64(fileData) {
+  if (fileData?.data) return fileData.data;
+  const blob = fileDataToBlob(fileData);
+  const dataUrl = await blobToDataUrl(blob);
+  fileData.data = dataUrl.split(',')[1];
+  return fileData.data;
 }
 
 async function transcribeViaLocalServer(fileData, { onProgress } = {}) {
@@ -1030,7 +1109,7 @@ async function transcribeViaModal(fileData, { onProgress, large } = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        audio_b64: fileData.data,
+        audio_b64: await ensureBase64(fileData),
         filename: fileData.name || 'audio.webm'
       }),
       signal: controller.signal
@@ -1189,8 +1268,9 @@ async function transcribeWithGroq(jobId, fileData, groqApiKey) {
   }
 }
 
-// Handle Whisper transcription
-async function transcribeWithWhisper(jobId, file, fileName, model) {
+// Handle Whisper transcription (fileData = { name, type, size, data: base64 })
+async function transcribeWithWhisper(jobId, fileData, model) {
+  const fileName = fileData?.name || 'audio';
   try {
     await updateJobProgress(jobId, {
       status: 'processing',
@@ -1198,9 +1278,12 @@ async function transcribeWithWhisper(jobId, file, fileName, model) {
       progress: 30
     });
 
+    // Popup/recording paths may pass base64; file uploads pass a Blob via IDB.
+    // Appending the raw object makes multer see no file ("No file uploaded").
+    const blob = fileDataToBlob(fileData);
     const formData = new FormData();
-    formData.append('file', file);
-    formData.append('model', model);
+    formData.append('file', blob, fileName);
+    formData.append('model', model || 'tiny');
 
     let response;
     try {
@@ -1293,6 +1376,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ping') {
     sendResponse({ pong: true });
     return false;
+  }
+
+  if (message.type === 'getCaptureTargetTab') {
+    chrome.storage.session.get('captureTargetTabId').then((result) => {
+      sendResponse({ tabId: result.captureTargetTabId ?? null });
+    });
+    return true;
   }
 
   // ---- Recording messages ----
@@ -1508,46 +1598,74 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ---- Transcription messages ----
 
   if (message.type === 'start_transcription') {
-    const jobId = generateJobId();
-    const startTime = Date.now();
-    activeJobs.set(jobId, { jobId, startedAt: startTime });
-    startKeepAlive();
-    
-    // Initialize job data with start time
-    chrome.storage.local.set({
-      [`transcription_${jobId}`]: {
-        startTime,
-        status: 'starting',
-        progress: 0,
-        updatedAt: startTime
-      }
-    });
+    (async () => {
+      const jobId = generateJobId();
+      const startTime = Date.now();
+      activeJobs.set(jobId, { jobId, startedAt: startTime });
+      startKeepAlive();
 
-    // Get preferences
-    chrome.storage.sync.get(['transcription_service', 'whisper_model', 'modal_whisper_url', 'groq_api_key'], async (res) => {
-      const service = res.transcription_service || 'groq';
-      const modelSize = res.whisper_model || 'base';
-      const modalUrl = res.modal_whisper_url || '';
-      const groqKey = res.groq_api_key || GROQ_API_KEY;
+      chrome.storage.local.set({
+        [`transcription_${jobId}`]: {
+          startTime,
+          status: 'starting',
+          progress: 0,
+          updatedAt: startTime
+        }
+      });
 
-      if (message.source === 'url') {
-        transcribeUrl(jobId, message.url);
-      } else if (message.source === 'file') {
-        if (!message.fileData) {
+      let responded = false;
+      try {
+        let fileData = message.fileData || null;
+        if (message.source === 'file' && message.fileId) {
+          const { blob, mimeType } = await getRecordingFromIDB(message.fileId);
+          fileData = {
+            name: message.fileName || 'audio',
+            type: message.fileType || mimeType,
+            size: message.fileSize || blob.size,
+            blob
+          };
+          await deleteBlobFromIDB(message.fileId).catch(() => {});
+        }
+
+        if (message.source === 'file' && !fileData) {
           sendResponse({ error: 'File data not provided' });
+          responded = true;
+          activeJobs.delete(jobId);
+          stopKeepAlive();
           return;
         }
-        if (service === 'whisper-modal') {
-          transcribeWithModalWhisper(jobId, message.fileData, modalUrl, modelSize);
-        } else if (service === 'whisper') {
-          transcribeWithWhisper(jobId, message.fileData, modelSize);
-        } else {
-          transcribeWithGroq(jobId, message.fileData, groqKey);
-        }
-      }
 
-      sendResponse({ jobId, status: 'started' });
-    });
+        sendResponse({ jobId, status: 'started' });
+        responded = true;
+
+        const res = await chrome.storage.sync.get([
+          'transcription_service',
+          'whisper_model',
+          'modal_whisper_url',
+          'groq_api_key'
+        ]);
+        const service = res.transcription_service || 'groq';
+        const modelSize = res.whisper_model || 'base';
+        const modalUrl = res.modal_whisper_url || '';
+        const groqKey = res.groq_api_key || GROQ_API_KEY;
+
+        if (message.source === 'url') {
+          transcribeUrl(jobId, message.url);
+        } else if (service === 'whisper-modal') {
+          transcribeWithModalWhisper(jobId, fileData, modalUrl, modelSize);
+        } else if (service === 'whisper') {
+          transcribeWithWhisper(jobId, fileData, modelSize);
+        } else {
+          transcribeWithGroq(jobId, fileData, groqKey);
+        }
+      } catch (err) {
+        if (!responded) {
+          sendResponse({ error: err.message || 'Failed to start transcription' });
+        }
+        activeJobs.delete(jobId);
+        stopKeepAlive();
+      }
+    })();
 
     return true; // Keep channel open for async response
   }

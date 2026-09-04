@@ -25,9 +25,21 @@ const AUDIO_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // check hourly
 
 if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR);
 
-// Configure multer for file uploads (large interviews are auto-compressed before Groq)
+// Configure multer for file uploads (large interviews are auto-compressed before Groq).
+// Must keep the original extension — Groq infers type from the filename and rejects
+// extensionless multer temp names (e.g. "a1b2c3d4").
+const ALLOWED_AUDIO_EXTS = new Set([
+  '.flac', '.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.ogg', '.opus', '.wav', '.webm',
+]);
 const upload = multer({
-  dest: AUDIO_DIR,
+  storage: multer.diskStorage({
+    destination: AUDIO_DIR,
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const safeExt = ALLOWED_AUDIO_EXTS.has(ext) ? ext : '.mp3';
+      cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}${safeExt}`);
+    },
+  }),
   limits: { fileSize: 200 * 1024 * 1024 } // 200MB — compress/chunk before Groq's 24MB cap
 });
 
@@ -94,14 +106,26 @@ async function transcribePathsWithGroq(paths, { language, model } = {}) {
   const useModel = model || GROQ_MODEL;
   const parts = [];
   for (const chunkPath of paths) {
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(chunkPath),
-      model: useModel,
-      response_format: 'json',
-      ...(language ? { language } : {}),
-    });
-    const text = (transcription.text || '').trim();
-    if (text) parts.push(text);
+    // Groq SDK uses the stream path basename for content-type sniffing.
+    let uploadPath = chunkPath;
+    if (!path.extname(chunkPath)) {
+      uploadPath = `${chunkPath}.mp3`;
+      fs.copyFileSync(chunkPath, uploadPath);
+    }
+    try {
+      const transcription = await groq.audio.transcriptions.create({
+        file: fs.createReadStream(uploadPath),
+        model: useModel,
+        response_format: 'json',
+        ...(language ? { language } : {}),
+      });
+      const text = (transcription.text || '').trim();
+      if (text) parts.push(text);
+    } finally {
+      if (uploadPath !== chunkPath && fs.existsSync(uploadPath)) {
+        fs.unlinkSync(uploadPath);
+      }
+    }
   }
   const text = parts.join('\n\n');
   if (!text) {

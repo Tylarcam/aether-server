@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:opera": "vite build --mode opera",
     "preview": "vite preview",
     "lint": "eslint .",
     "start": "node server.js",
